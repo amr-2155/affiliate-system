@@ -178,43 +178,46 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       }
 
       case "pay": {
-        const pending = await prisma.bonusLedger.findMany({
-          where: { referralId: id, status: "EARNED" },
-          select: { id: true, amount: true },
-        })
-        if (pending.length === 0) {
-          return NextResponse.json({ error: "لا يوجد بونص مستحق للصرف" }, { status: 400 })
-        }
-        const total = pending.reduce((s, p) => s + p.amount, 0)
-        await prisma.$transaction([
-          prisma.user.update({
-            where: { id: referral.affiliateId },
-            data: { balance: { increment: total }, totalEarnings: { increment: total } },
-          }),
-          prisma.bonusLedger.updateMany({
+        const result = await prisma.$transaction(async (tx) => {
+          const pending = await tx.bonusLedger.findMany({
+            where: { referralId: id, status: "EARNED" },
+            select: { id: true, amount: true },
+          })
+          if (pending.length === 0) return { paid: 0, count: 0 }
+          const total = pending.reduce((s, p) => s + p.amount, 0)
+          const updated = await tx.bonusLedger.updateMany({
             where: { referralId: id, status: "EARNED" },
             data: { status: "PAID", paidAt: new Date() },
-          }),
-        ])
+          })
+          if (updated.count === 0) return { paid: 0, count: 0 }
+          await tx.user.update({
+            where: { id: referral.affiliateId },
+            data: { balance: { increment: total }, totalEarnings: { increment: total } },
+          })
+          return { paid: total, count: updated.count }
+        })
+        if (result.count === 0) {
+          return NextResponse.json({ error: "لا يوجد بونص مستحق للصرف" }, { status: 400 })
+        }
         await prisma.supplierReferralEvent.create({
           data: {
             referralId: id,
             actorId: actor.id,
             actorRole: actor.role,
             action: "BONUS_PAID",
-            note: `صرف ${formatCurrency(total)} لـ ${pending.length} بونص`,
+            note: `صرف ${formatCurrency(result.paid)} لـ ${result.count} بونص`,
           },
         })
-        await logActivity(actor.id, "SUPPLIER_BONUS_PAID", "suppliers", `صرف بونص «${referral.supplierName}» = ${formatCurrency(total)}`, id)
+        await logActivity(actor.id, "SUPPLIER_BONUS_PAID", "suppliers", `صرف بونص «${referral.supplierName}» = ${formatCurrency(result.paid)}`, id)
         notify({
           title: "تم صرف بونص موردك 💰",
-          message: `تم صرف ${formatCurrency(total)} من بونصات «${referral.supplierName}» إلى رصيدك وأصبحت متاحة للسحب.`,
+          message: `تم صرف ${formatCurrency(result.paid)} من بونصات «${referral.supplierName}» إلى رصيدك وأصبحت متاحة للسحب.`,
           type: NOTIFICATION_TYPE.EARNINGS,
           userId: referral.affiliateId,
           link: "/referrals",
           relatedId: referral.id,
         })
-        return NextResponse.json({ success: true, paid: total, count: pending.length })
+        return NextResponse.json({ success: true, paid: result.paid, count: result.count })
       }
 
       default:

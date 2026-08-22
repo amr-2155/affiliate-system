@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { requireAdminPermission, logActivity } from "@/lib/admin-guard"
-import { formatCurrency } from "@/lib/utils"
+import { formatCurrency, getStatusText } from "@/lib/utils"
+import { canTransitionOrder, TERMINAL_STATUSES } from "@/lib/order-state"
 import { notify, NOTIFICATION_TYPE } from "@/lib/notifications"
 import { settleBonusesForOrder, revokeBonusesForOrder, BONUS_COUNT_STATUSES, BONUS_REVOKE_STATUSES, BONUS_NON_EARNING_STATUSES } from "@/lib/supplier-bonus"
 
@@ -19,6 +20,22 @@ export async function PUT(req: NextRequest) {
       where: { id: { in: ids } },
       select: { id: true, status: true, orderNumber: true, affiliateId: true },
     })
+
+    // Validate transitions for all orders
+    const invalidOrders: string[] = []
+    for (const order of existing) {
+      if (order.status === status) continue
+      if ((TERMINAL_STATUSES as readonly string[]).includes(order.status)) {
+        invalidOrders.push(`${order.orderNumber} (حالة نهائية)`)
+        continue
+      }
+      if (!canTransitionOrder(order.status, status)) {
+        invalidOrders.push(`${order.orderNumber} (${getStatusText(order.status)} → ${getStatusText(status)})`)
+      }
+    }
+    if (invalidOrders.length > 0) {
+      return NextResponse.json({ error: `لا يمكن تحديث الطلبات: ${invalidOrders.join(", ")}` }, { status: 400 })
+    }
 
     const data: any = { status }
     if (status === "DELIVERED") data.deliveredAt = new Date()
@@ -78,13 +95,9 @@ export async function PUT(req: NextRequest) {
           relatedId: order.id,
         })
       } else {
-        const afUser = await prisma.user.findUnique({ where: { id: order.affiliateId }, select: { balance: true, totalEarnings: true } })
         await prisma.user.update({
           where: { id: order.affiliateId },
-          data: {
-            balance: Math.max(0, (afUser?.balance || 0) - commission),
-            totalEarnings: Math.max(0, (afUser?.totalEarnings || 0) - commission),
-          },
+          data: { balance: { decrement: commission }, totalEarnings: { decrement: commission } },
         })
       }
     }

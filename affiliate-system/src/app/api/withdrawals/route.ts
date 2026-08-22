@@ -45,11 +45,17 @@ export async function POST(req: NextRequest) {
     }
 
     const user = await prisma.user.findUnique({ where: { id: session.user.id } })
-    if (!user || user.balance < amount) {
-      return NextResponse.json({ error: "الرصيد غير كافٍ" }, { status: 400 })
+    if (!user) {
+      return NextResponse.json({ error: "المستخدم غير موجود" }, { status: 400 })
     }
 
     const withdrawal = await prisma.$transaction(async (tx: any) => {
+      // Re-check balance inside the transaction to prevent race conditions
+      const freshUser = await tx.user.findUnique({ where: { id: session.user.id }, select: { balance: true } })
+      if (!freshUser || freshUser.balance < amount) {
+        throw new Error("INSUFFICIENT_BALANCE")
+      }
+
       const w = await tx.withdrawal.create({
         data: {
           amount,
@@ -89,7 +95,10 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json(withdrawal)
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.message === "INSUFFICIENT_BALANCE") {
+      return NextResponse.json({ error: "الرصيد غير كافٍ" }, { status: 400 })
+    }
     return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })
   }
 }
