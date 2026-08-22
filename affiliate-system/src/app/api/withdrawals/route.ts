@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth"
 import { formatCurrency } from "@/lib/utils"
 import { getSetting, isSettingEnabled } from "@/lib/settings"
 import { notifyMany, NOTIFICATION_TYPE } from "@/lib/notifications"
+import { checkRateLimit, RATE_LIMITS } from "@/lib/rate-limit"
 
 export async function GET() {
   try {
@@ -33,6 +34,11 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const { amount, method, accountName, accountNumber, bankName } = body
+
+    const rl = checkRateLimit(`withdrawal:${session.user.id}`, RATE_LIMITS.withdrawal)
+    if (!rl.allowed) {
+      return NextResponse.json({ error: "تم تجاوز الحد المسموح. حاول لاحقًا." }, { status: 429 })
+    }
 
     if (!amount || amount <= 0) {
       return NextResponse.json({ error: "المبلغ غير صحيح" }, { status: 400 })

@@ -10,6 +10,7 @@ import { emitEvent } from "@/lib/events"
 import { getConfirmationDeadlineDays } from "@/lib/jobs/auto-cancel"
 import { computeCommission } from "@/lib/commission"
 import { isAffiliateEditable } from "@/lib/order-state"
+import { checkRateLimit, RATE_LIMITS } from "@/lib/rate-limit"
 
 export async function GET(req: NextRequest) {
   try {
@@ -76,6 +77,11 @@ export async function POST(req: NextRequest) {
     const session = await getServerSession(authOptions)
     if (!session?.user?.id) {
       return NextResponse.json({ error: "غير مصرح" }, { status: 401 })
+    }
+
+    const rl = checkRateLimit(`orderCreate:${session.user.id}`, RATE_LIMITS.orderCreate)
+    if (!rl.allowed) {
+      return NextResponse.json({ error: "تم تجاوز الحد المسموح من الطلبات. حاول لاحقًا." }, { status: 429 })
     }
 
     const body = await req.json()
