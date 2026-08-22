@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma"
 import { authenticateApiKey } from "@/lib/api-keys"
 import { formatCurrency } from "@/lib/utils"
 import { emitEvent } from "@/lib/events"
+import { canTransitionOrder, TERMINAL_STATUSES } from "@/lib/order-state"
 import { settleBonusesForOrder, revokeBonusesForOrder, BONUS_COUNT_STATUSES, BONUS_REVOKE_STATUSES, BONUS_NON_EARNING_STATUSES } from "@/lib/supplier-bonus"
 
 /**
@@ -28,6 +29,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const VALID_STATUSES = ["CONFIRMED", "REJECTED", "PROCESSING", "SHIPPED", "DELIVERED", "COLLECTED", "CANCELLED"]
     const data: any = {}
     if (status && VALID_STATUSES.includes(status)) {
+      if ((TERMINAL_STATUSES as readonly string[]).includes(order.status)) {
+        return NextResponse.json({ error: "الطلب في حالة نهائية ولا يمكن تحديثه" }, { status: 400 })
+      }
+      if (!canTransitionOrder(order.status, status)) {
+        return NextResponse.json({ error: `لا يمكن الانتقال من ${order.status} إلى ${status}` }, { status: 400 })
+      }
       data.status = status
       if (status === "DELIVERED") data.deliveredAt = new Date()
       if (status === "COLLECTED") data.collectedAt = new Date()
@@ -40,6 +47,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
 
     const updated = await prisma.order.update({ where: { id }, data })
+
+    // Handle commission credit/reversal on COLLECTED transition
+    if (status) {
+      const prevCollected = order.status === "COLLECTED"
+      const newCollected = status === "COLLECTED"
+      if ((newCollected && !prevCollected) || (!newCollected && prevCollected)) {
+        const agg = await prisma.commissionLog.aggregate({ where: { orderId: order.id }, _sum: { amount: true } })
+        const commission = agg._sum.amount || 0
+        if (commission > 0) {
+          if (newCollected && !prevCollected) {
+            await prisma.user.update({ where: { id: order.affiliateId }, data: { balance: { increment: commission }, totalEarnings: { increment: commission } } })
+          } else {
+            await prisma.user.update({ where: { id: order.affiliateId }, data: { balance: { decrement: commission }, totalEarnings: { decrement: commission } } })
+          }
+        }
+      }
+    }
 
     // بونص حملة الموردين — يُحتسب عند التسليم/التحصيل ويُسحب عند الخروج منهما.
     if ((BONUS_COUNT_STATUSES as readonly string[]).includes(status)) {
