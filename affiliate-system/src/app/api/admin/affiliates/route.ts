@@ -1,0 +1,40 @@
+import { NextRequest, NextResponse } from "next/server"
+import { prisma } from "@/lib/prisma"
+import { requireAdminPermission } from "@/lib/admin-guard"
+
+export async function GET(req: NextRequest) {
+  try {
+    const guard = await requireAdminPermission("affiliates.view")
+    if (guard instanceof NextResponse) return guard
+
+    const { searchParams } = new URL(req.url)
+    const search = searchParams.get("search") || ""
+    const status = searchParams.get("status") || ""
+
+    const where: any = { role: "AFFILIATE" }
+    if (search) {
+      where.OR = [
+        { name: { contains: search } },
+        { email: { contains: search } },
+        { phone: { contains: search } },
+        { referralCode: { contains: search } },
+      ]
+    }
+    if (status) where.status = status
+
+    const affiliates = await prisma.user.findMany({
+      where,
+      select: {
+        id: true, name: true, email: true, phone: true, status: true,
+        commissionRate: true, balance: true, totalEarnings: true,
+        referralCode: true, createdAt: true,
+        _count: { select: { orders: true, withdrawals: true } },
+      },
+      orderBy: { totalEarnings: "desc" },
+    })
+
+    return NextResponse.json(affiliates)
+  } catch (error) {
+    return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })
+  }
+}

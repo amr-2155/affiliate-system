@@ -1,0 +1,129 @@
+
+> affiliate-system@0.1.0 build
+> next build
+
+▲ Next.js 16.2.10 (Turbopack)
+- Environments: .env
+
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead. Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+  Creating an optimized production build ...
+Turbopack build encountered 1 warnings:
+./next.config.ts
+Encountered unexpected file in NFT list
+A file was traced that indicates that the whole project was traced unintentionally. Somewhere in the import trace below, there are:
+- filesystem operations (like path.join, path.resolve or fs.readFile), or
+- very dynamic requires (like require('./' + foo)).
+To resolve this, you can
+- remove them if possible, or
+- only use them in development, or
+- make sure they are statically scoped to some subfolder: path.join(process.cwd(), 'data', bar), or
+- add ignore comments: path.join(/*turbopackIgnore: true*/ process.cwd(), bar)
+
+Import trace:
+  App Route:
+    ./next.config.ts
+    ./src/app/api/uploads/[...path]/route.ts
+
+
+✓ Compiled successfully in 25.1s
+  Running TypeScript ...
+  Finished TypeScript in 36.2s ...
+  Collecting page data using 3 workers ...
+  Generating static pages using 3 workers (0/60) ...
+  Generating static pages using 3 workers (15/60) 
+  Generating static pages using 3 workers (30/60) 
+  Generating static pages using 3 workers (45/60) 
+✓ Generating static pages using 3 workers (60/60) in 2.2s
+  Finalizing page optimization ...
+
+Route (app)
+┌ ○ /
+├ ○ /_not-found
+├ ○ /admin
+├ ○ /admin/affiliates
+├ ○ /admin/categories
+├ ○ /admin/confirmation-team
+├ ○ /admin/managers
+├ ○ /admin/notifications
+├ ○ /admin/orders
+├ ƒ /admin/orders/[id]
+├ ○ /admin/products
+├ ƒ /admin/products/[id]
+├ ○ /admin/settings
+├ ○ /admin/withdrawals
+├ ƒ /api/admin/affiliates
+├ ƒ /api/admin/affiliates/[id]
+├ ƒ /api/admin/affiliates/[id]/profile
+├ ƒ /api/admin/affiliates/create
+├ ƒ /api/admin/affiliates/stats
+├ ƒ /api/admin/categories
+├ ƒ /api/admin/confirmation
+├ ƒ /api/admin/confirmation/[id]
+├ ƒ /api/admin/confirmation/[id]/password
+├ ƒ /api/admin/confirmation/assign
+├ ƒ /api/admin/confirmation/stats
+├ ƒ /api/admin/dashboard
+├ ƒ /api/admin/dashboard/widgets
+├ ƒ /api/admin/managers
+├ ƒ /api/admin/managers/[id]
+├ ƒ /api/admin/managers/[id]/activity
+├ ƒ /api/admin/managers/[id]/password
+├ ƒ /api/admin/managers/stats
+├ ƒ /api/admin/notifications
+├ ƒ /api/admin/orders
+├ ƒ /api/admin/orders/[id]
+├ ƒ /api/admin/orders/[id]/comments
+├ ƒ /api/admin/orders/[id]/images
+├ ƒ /api/admin/orders/batch
+├ ƒ /api/admin/orders/batch-comments
+├ ƒ /api/admin/orders/batch/comments
+├ ƒ /api/admin/products
+├ ƒ /api/admin/products/[id]
+├ ƒ /api/admin/search
+├ ƒ /api/admin/settings
+├ ƒ /api/admin/shipping
+├ ƒ /api/admin/withdrawals
+├ ƒ /api/auth/[...nextauth]
+├ ƒ /api/auth/register
+├ ƒ /api/categories
+├ ƒ /api/dashboard
+├ ƒ /api/dashboard/widgets
+├ ƒ /api/favorites
+├ ƒ /api/notifications
+├ ƒ /api/orders
+├ ƒ /api/products
+├ ƒ /api/products/[id]
+├ ƒ /api/profile
+├ ƒ /api/settings
+├ ƒ /api/shipping
+├ ƒ /api/suggestions
+├ ƒ /api/upload
+├ ƒ /api/uploads/[...path]
+├ ƒ /api/withdrawals
+├ ○ /cart
+├ ○ /dashboard
+├ ○ /favorites
+├ ƒ /help
+├ ƒ /help/contact
+├ ƒ /help/delivery
+├ ƒ /help/faq
+├ ƒ /help/privacy
+├ ƒ /help/returns
+├ ƒ /help/terms
+├ ○ /login
+├ ○ /notifications
+├ ○ /orders
+├ ○ /products
+├ ƒ /products/[id]
+├ ○ /profile
+├ ○ /register
+├ ○ /shipping
+├ ○ /suggestions
+└ ○ /withdrawals
+
+
+ƒ Proxy (Middleware)
+
+○  (Static)   prerendered as static content
+ƒ  (Dynamic)  server-rendered on demand
+
