@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { requireAdminPermission, logActivity } from "@/lib/admin-guard"
+import { requireAdminPermission, requireAdminActor, logActivity } from "@/lib/admin-guard"
 import { notify, NOTIFICATION_TYPE } from "@/lib/notifications"
 
 export async function GET() {
@@ -22,6 +22,9 @@ export async function GET() {
 
 export async function PUT(req: NextRequest) {
   try {
+    const actor = await requireAdminActor()
+    if (!actor) return NextResponse.json({ error: "غير مصرح" }, { status: 403 })
+
     const { id, status, notes, proofImage } = await req.json()
 
     // فصل صلاحيات حالة السحب: الموافقة / الرفض / تأكيد التحويل صلاحيات مستقلة

@@ -3,6 +3,14 @@ import CredentialsProvider from "next-auth/providers/credentials"
 import bcrypt from "bcryptjs"
 import { prisma } from "./prisma"
 
+const secret = process.env.NEXTAUTH_SECRET
+if (!secret || secret.length < 32) {
+  throw new Error(
+    "FATAL: NEXTAUTH_SECRET is missing or too short. " +
+    "Set a secure random string (>= 32 chars) in your environment variables."
+  )
+}
+
 export const authOptions: NextAuthOptions = {
   providers: [
     CredentialsProvider({
@@ -72,5 +80,5 @@ export const authOptions: NextAuthOptions = {
   pages: {
     signIn: "/login"
   },
-  secret: process.env.NEXTAUTH_SECRET
+  secret,
 }

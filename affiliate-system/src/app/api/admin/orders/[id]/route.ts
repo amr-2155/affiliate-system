@@ -4,6 +4,7 @@ import { requireAdminPermission, requireAdminActor, actorCan, logActivity } from
 import { formatCurrency, getStatusText } from "@/lib/utils"
 import { emitEvent } from "@/lib/events"
 import { computeCommission } from "@/lib/commission"
+import { canTransitionOrder, TERMINAL_STATUSES } from "@/lib/order-state"
 import { evaluateAffiliateRewards, INCENTIVE_COUNT_STATUSES } from "@/lib/incentives"
 import { settleBonusesForOrder, revokeBonusesForOrder, BONUS_COUNT_STATUSES, BONUS_REVOKE_STATUSES, BONUS_NON_EARNING_STATUSES } from "@/lib/supplier-bonus"
 import { notify, NOTIFICATION_TYPE } from "@/lib/notifications"
@@ -44,7 +45,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
 
     const { id } = await params
     const body = await req.json()
-    const { status, paymentStatus, trackingNumber, subtotal, shippingCost, discount, total, notes, internalNotes, customerName, customerPhone, customerAddress, customerCity, items } = body
+    const { status, paymentStatus, trackingNumber, shippingCost, discount, notes, internalNotes, customerName, customerPhone, customerAddress, customerCity, items } = body
 
     // صلاحية التحديث: تأكيد الطلب فقط (إلى CONFIRMED) متاح لفريق التأكيد عبر confirmation.confirm،
     // بينما تعديل أي بيانات/حالات أخرى يتطلب orders.update.
@@ -58,10 +59,23 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     const existing = await prisma.order.findUnique({ where: { id } })
     if (!existing) return NextResponse.json({ error: "غير موجود" }, { status: 404 })
 
+    // منع تعديل أوامر نهائية (ملغي/مرفوض/مرتجع)
+    if (status && status !== existing.status) {
+      if ((TERMINAL_STATUSES as readonly string[]).includes(existing.status)) {
+        return NextResponse.json({ error: "لا يمكن تغيير حالة طلب نهائي" }, { status: 400 })
+      }
+      if (!canTransitionOrder(existing.status, status)) {
+        return NextResponse.json({ error: `لا يمكن الانتقال من ${getStatusText(existing.status)} إلى ${getStatusText(status)}` }, { status: 400 })
+      }
+    }
+
+    // لا يُسمح بتعديل subtotal/total مباشرة من العميل — هذه الحقول تُحسب تلقائيًا
+    // (subtotal = sum of item totals, total = subtotal + shippingCost - discount)
+
     // تتبّع الحقول المتغيرة لسجل الطلب (دون تقييد صلاحيات المدير)
     const fieldLabels: Record<string, string> = {
       paymentStatus: "حالة الدفع", trackingNumber: "رقم التتبع",
-      subtotal: "المجموع الفرعي", shippingCost: "الشحن", discount: "الخصم", total: "الإجمالي",
+      shippingCost: "الشحن", discount: "الخصم",
       customerName: "اسم العميل", customerPhone: "هاتف العميل", customerAddress: "العنوان", customerCity: "المدينة",
       notes: "ملاحظات", internalNotes: "ملاحظات داخلية",
     }
@@ -83,10 +97,8 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     }
     if (paymentStatus) data.paymentStatus = paymentStatus
     if (trackingNumber !== undefined) data.trackingNumber = trackingNumber
-    if (subtotal !== undefined) data.subtotal = parseFloat(subtotal)
     if (shippingCost !== undefined) data.shippingCost = parseFloat(shippingCost)
     if (discount !== undefined) data.discount = parseFloat(discount)
-    if (total !== undefined) data.total = parseFloat(total)
     if (notes !== undefined) data.notes = notes
     if (internalNotes !== undefined) data.internalNotes = internalNotes
     if (customerName !== undefined) data.customerName = customerName
@@ -123,15 +135,18 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
         include: { product: { select: { price: true, minPrice: true, affiliateCostPrice: true } } },
       })
       const newSubtotal = updatedItems.reduce((sum, i) => sum + i.total, 0)
-      const newTotal = newSubtotal + (data.shippingCost ?? order.shippingCost) - (data.discount ?? order.discount)
-      await prisma.order.update({ where: { id }, data: { subtotal: newSubtotal, total: newTotal } })
-
-      // إعادة حساب العمولة بعد تعديل أسعار/كميات المنتجات (المدير غير مقيد)
+      const finalShipping = data.shippingCost !== undefined ? data.shippingCost : order.shippingCost
+      const finalDiscount = data.discount !== undefined ? data.discount : order.discount
+      const newTotal = newSubtotal + finalShipping - finalDiscount
       const newCommission = computeCommission(updatedItems.map((i) => ({ product: i.product, unitPrice: i.unitPrice, quantity: i.quantity })))
-      await prisma.commissionLog.deleteMany({ where: { orderId: id } })
-      if (newCommission > 0) {
-        await prisma.commissionLog.create({ data: { amount: newCommission, orderId: id, userId: existing.affiliateId } })
-      }
+
+      await prisma.$transaction([
+        prisma.order.update({ where: { id }, data: { subtotal: newSubtotal, total: newTotal } }),
+        prisma.commissionLog.deleteMany({ where: { orderId: id } }),
+        ...(newCommission > 0
+          ? [prisma.commissionLog.create({ data: { amount: newCommission, orderId: id, userId: existing.affiliateId } })]
+          : []),
+      ])
 
       await logActivity(
         actor.id,
@@ -166,12 +181,15 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       const newCollected = status === "COLLECTED"
 
       if (newCollected && !prevCollected) {
-        // Credit the order's commission to the affiliate balance
+        // Credit the order's commission to the affiliate balance (atomic)
         if (commission > 0) {
-          await prisma.user.update({
-            where: { id: existing.affiliateId },
-            data: { balance: { increment: commission }, totalEarnings: { increment: commission } },
-          })
+          await prisma.$transaction([
+            prisma.user.update({
+              where: { id: existing.affiliateId },
+              data: { balance: { increment: commission }, totalEarnings: { increment: commission } },
+            }),
+            prisma.order.update({ where: { id }, data: { paymentStatus: "PAID" } }),
+          ])
           notify({
             title: "تم تحصيل العمولة",
             message: `تم تحصيل عمولة طلب ${existing.orderNumber} بقيمة ${formatCurrency(commission)} وأصبحت متاحة للسحب`,
@@ -182,13 +200,12 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
           })
         }
       } else if (!newCollected && prevCollected && commission > 0) {
-        // Revert the credited commission if order leaves the collected state
-        const afUser = await prisma.user.findUnique({ where: { id: existing.affiliateId }, select: { balance: true, totalEarnings: true } })
+        // Revert the credited commission if order leaves the collected state (atomic)
         await prisma.user.update({
           where: { id: existing.affiliateId },
           data: {
-            balance: Math.max(0, (afUser?.balance || 0) - commission),
-            totalEarnings: Math.max(0, (afUser?.totalEarnings || 0) - commission),
+            balance: { decrement: commission },
+            totalEarnings: { decrement: commission },
           },
         })
       }
@@ -260,7 +277,12 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     const guard = await requireAdminPermission("orders.update")
     if (guard instanceof NextResponse) return guard
     const { id } = await params
-    await prisma.order.delete({ where: { id } })
+    const order = await prisma.order.findUnique({ where: { id }, select: { id: true, status: true } })
+    if (!order) return NextResponse.json({ error: "غير موجود" }, { status: 404 })
+    if ((TERMINAL_STATUSES as readonly string[]).includes(order.status)) {
+      return NextResponse.json({ error: "لا يمكن حذف طلب نهائي" }, { status: 400 })
+    }
+    await prisma.order.update({ where: { id }, data: { status: "CANCELLED", cancelledAt: new Date(), cancelReason: "حذف من الإدارة" } })
     return NextResponse.json({ success: true })
   } catch (error) {
     return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })

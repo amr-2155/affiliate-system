@@ -85,6 +85,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "جميع الحقول مطلوبة" }, { status: 400 })
     }
 
+    if (!Array.isArray(items) || items.length > 50) {
+      return NextResponse.json({ error: "المنتجات غير صالحة" }, { status: 400 })
+    }
+
+    for (const item of items) {
+      if (!item.productId || !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 1000) {
+        return NextResponse.json({ error: `كمية غير صالحة للمنتج ${item.productId || "?"}` }, { status: 400 })
+      }
+    }
+
     let subtotal = 0
     const orderItems: { productId: string; quantity: number; unitPrice: number; total: number }[] = []
     const commissionInputs: { product: any; unitPrice: number; quantity: number }[] = []
@@ -119,7 +129,7 @@ export async function POST(req: NextRequest) {
 
     const order = await prisma.$transaction(async (tx) => {
       const orderNumber = await nextOrderNumber(tx)
-      return tx.order.create({
+      const created = await tx.order.create({
         data: {
           orderNumber,
           subtotal,
@@ -138,19 +148,21 @@ export async function POST(req: NextRequest) {
         },
         include: { items: true },
       })
-    })
 
-    // Create commission log based on price difference
-    const totalCommission = computeCommission(commissionInputs)
-    if (totalCommission > 0) {
-      await prisma.commissionLog.create({
-        data: {
-          amount: totalCommission,
-          orderId: order.id,
-          userId: session.user.id,
-        }
-      })
-    }
+      // Create commission log inside the transaction for consistency
+      const totalCommission = computeCommission(commissionInputs)
+      if (totalCommission > 0) {
+        await tx.commissionLog.create({
+          data: {
+            amount: totalCommission,
+            orderId: created.id,
+            userId: session.user.id,
+          }
+        })
+      }
+
+      return created
+    })
 
     // Notify all admins about the new order (respecting notification settings)
     const newOrderNotif = await isSettingEnabled("notif-new-order", true)
