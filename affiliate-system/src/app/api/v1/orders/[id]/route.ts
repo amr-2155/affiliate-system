@@ -2,13 +2,15 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { authenticateApiKey } from "@/lib/api-keys"
 import { formatCurrency } from "@/lib/utils"
-import { emitEvent } from "@/lib/events"
-import { canTransitionOrder, TERMINAL_STATUSES } from "@/lib/order-state"
-import { settleBonusesForOrder, revokeBonusesForOrder, BONUS_COUNT_STATUSES, BONUS_REVOKE_STATUSES, BONUS_NON_EARNING_STATUSES } from "@/lib/supplier-bonus"
+import { applyOrderTransition, OrderStateError } from "@/lib/order-service"
 
 /**
  * نقطة وصول عامة لمصادقة API Key — تُستخدم لإرسال أحداث الطلب
- * إلى خدمات خارجية (n8n وغيرها). تُحدَّث حالة الطلب بأمان.
+ * إلى خدمات خارجية (n8n وغيرها).
+ *
+ * كل تحديثات الحالة تمر عبر OrderService: تحقق الانتقالات، قفل
+ * الحالات النهائية، وذرّية العمولة/البونص/الأحداث — نفس المسار
+ * المستخدم في لوحة الأدمن والـ webhooks (لا منطق مكرر ولا انحراف).
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -19,83 +21,48 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
 
     const body = await req.json()
-    const { status, trackingNumber } = body
+    const { status, trackingNumber, reason } = body
 
-    const order = await prisma.order.findUnique({ where: { id } })
-    if (!order) {
-      return NextResponse.json({ error: "الطلب غير موجود" }, { status: 404 })
-    }
-
-    const VALID_STATUSES = ["CONFIRMED", "REJECTED", "PROCESSING", "SHIPPED", "DELIVERED", "COLLECTED", "CANCELLED"]
-    const data: any = {}
-    if (status && VALID_STATUSES.includes(status)) {
-      if ((TERMINAL_STATUSES as readonly string[]).includes(order.status)) {
-        return NextResponse.json({ error: "الطلب في حالة نهائية ولا يمكن تحديثه" }, { status: 400 })
-      }
-      if (!canTransitionOrder(order.status, status)) {
-        return NextResponse.json({ error: `لا يمكن الانتقال من ${order.status} إلى ${status}` }, { status: 400 })
-      }
-      data.status = status
-      if (status === "DELIVERED") data.deliveredAt = new Date()
-      if (status === "COLLECTED") data.collectedAt = new Date()
-      if (status === "CANCELLED") { data.cancelledAt = new Date(); data.cancelReason = body.reason || "إلغاء عبر API" }
-    }
-    if (trackingNumber !== undefined) data.trackingNumber = String(trackingNumber)
-
-    if (Object.keys(data).length === 0) {
+    if (status === undefined && trackingNumber === undefined) {
       return NextResponse.json({ error: "لا توجد تغييرات صالحة" }, { status: 400 })
     }
 
-    const updated = await prisma.order.update({ where: { id }, data })
-
-    // Handle commission credit/reversal on COLLECTED transition
-    if (status) {
-      const prevCollected = order.status === "COLLECTED"
-      const newCollected = status === "COLLECTED"
-      if ((newCollected && !prevCollected) || (!newCollected && prevCollected)) {
-        const agg = await prisma.commissionLog.aggregate({ where: { orderId: order.id }, _sum: { amount: true } })
-        const commission = agg._sum.amount || 0
-        if (commission > 0) {
-          if (newCollected && !prevCollected) {
-            await prisma.user.update({ where: { id: order.affiliateId }, data: { balance: { increment: commission }, totalEarnings: { increment: commission } } })
-          } else {
-            await prisma.user.update({ where: { id: order.affiliateId }, data: { balance: { decrement: commission }, totalEarnings: { decrement: commission } } })
-          }
-        }
+    // Non-status fields update directly; status goes through OrderService.
+    if (trackingNumber !== undefined) {
+      const res = await prisma.order.updateMany({
+        where: { id },
+        data: { trackingNumber: String(trackingNumber) },
+      })
+      if (res.count === 0) {
+        return NextResponse.json({ error: "الطلب غير موجود" }, { status: 404 })
       }
     }
 
-    // بونص حملة الموردين — يُحتسب عند التسليم/التحصيل ويُسحب عند الخروج منهما.
-    if ((BONUS_COUNT_STATUSES as readonly string[]).includes(status)) {
-      settleBonusesForOrder(id).catch((e) => console.error("supplier bonus settle failed", e))
-    }
-    if ((BONUS_REVOKE_STATUSES as readonly string[]).includes(status) || (BONUS_NON_EARNING_STATUSES as readonly string[]).includes(status)) {
-      revokeBonusesForOrder(id).catch((e) => console.error("supplier bonus revoke failed", e))
-    }
-
-    const eventMap: Record<string, string> = {
-      CONFIRMED: "order.confirmed",
-      REJECTED: "order.rejected",
-      PROCESSING: "order.processing",
-      SHIPPED: "order.shipped",
-      DELIVERED: "order.delivered",
-      COLLECTED: "order.collected",
-      CANCELLED: "order.cancelled",
-    }
-    const eventName = eventMap[status]
-    if (eventName) {
-      await emitEvent(eventName, {
-        orderNumber: updated.orderNumber,
-        status: updated.status,
-        customerName: updated.customerName,
-        total: updated.total,
-        currency: updated.currency,
-        trackingNumber: updated.trackingNumber || null,
-        source: "api",
-      }, updated.id)
+    if (status !== undefined) {
+      try {
+        await applyOrderTransition({
+          orderId: id,
+          to: String(status),
+          source: "api",
+          cancelReason: typeof reason === "string" ? reason : "إلغاء عبر API",
+        })
+      } catch (e) {
+        if (e instanceof OrderStateError) {
+          return NextResponse.json({ error: e.message }, { status: e.httpStatus })
+        }
+        throw e
+      }
     }
 
-    return NextResponse.json({ ok: true, order: { orderNumber: updated.orderNumber, status: updated.status } })
+    const updated = await prisma.order.findUnique({
+      where: { id },
+      select: { orderNumber: true, status: true },
+    })
+    if (!updated) {
+      return NextResponse.json({ error: "الطلب غير موجود" }, { status: 404 })
+    }
+
+    return NextResponse.json({ ok: true, order: updated })
   } catch (error) {
     console.error("api/v1 status error", error)
     return NextResponse.json({ error: "حدث خطأ" }, { status: 500 })

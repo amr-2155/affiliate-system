@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { Prisma } from "@/generated/prisma/client"
 import { requireAdminPermission, logActivity } from "@/lib/admin-guard"
+import { textMatch } from "@/lib/text-search"
 
 // قائمة الطلبات المعلقة غير الموزعة (لنافذة التوزيع اليدوي)
 export async function GET(req: NextRequest) {
@@ -12,13 +14,13 @@ export async function GET(req: NextRequest) {
     const search = searchParams.get("search") || ""
     const status = searchParams.get("status") || "PENDING"
 
-    const where: any = { reviewerId: null }
+    const where: Prisma.OrderWhereInput = { reviewerId: null }
     if (status) where.status = status
     if (search) {
       where.OR = [
-        { orderNumber: { contains: search } },
-        { customerName: { contains: search } },
-        { customerPhone: { contains: search } },
+        { orderNumber: textMatch(search) },
+        { customerName: textMatch(search) },
+        { customerPhone: textMatch(search) },
       ]
     }
 

@@ -9,6 +9,11 @@ export default defineConfig({
   },
   engine: "classic",
   datasource: {
-    url: process.env.DATABASE_URL || `file:${path.join(__dirname, "prisma", "dev.db")}`,
+    // STAGING_DATABASE_URL routes CLI tooling at the PostgreSQL staging DB;
+    // absent (production) behavior is unchanged.
+    url:
+      process.env.STAGING_DATABASE_URL ||
+      process.env.DATABASE_URL ||
+      `file:${path.join(__dirname, "prisma", "dev.db")}`,
   },
 });

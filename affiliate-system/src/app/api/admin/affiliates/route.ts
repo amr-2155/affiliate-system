@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { Prisma } from "@/generated/prisma/client"
 import { requireAdminPermission } from "@/lib/admin-guard"
+import { textMatch } from "@/lib/text-search"
 
 export async function GET(req: NextRequest) {
   try {
@@ -11,13 +13,13 @@ export async function GET(req: NextRequest) {
     const search = searchParams.get("search") || ""
     const status = searchParams.get("status") || ""
 
-    const where: any = { role: "AFFILIATE" }
+    const where: Prisma.UserWhereInput = { role: "AFFILIATE" }
     if (search) {
       where.OR = [
-        { name: { contains: search } },
-        { email: { contains: search } },
-        { phone: { contains: search } },
-        { referralCode: { contains: search } },
+        { name: textMatch(search) },
+        { email: textMatch(search) },
+        { phone: textMatch(search) },
+        { referralCode: textMatch(search) },
       ]
     }
     if (status) where.status = status

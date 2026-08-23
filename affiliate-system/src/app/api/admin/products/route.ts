@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { Prisma } from "@/generated/prisma/client"
 import { requireAdminPermission } from "@/lib/admin-guard"
+import { textMatch } from "@/lib/text-search"
 
 export async function GET(req: NextRequest) {
   try {
@@ -16,18 +18,18 @@ export async function GET(req: NextRequest) {
     const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "20")))
 
     // لا تُظهر المنتجات المؤرشفة (Soft Delete) في القائمة الافتراضية.
-    const where: any = { deletedAt: null }
+    const where: Prisma.ProductWhereInput = { deletedAt: null }
     if (search) {
       where.OR = [
-        { name: { contains: search } },
-        { nameAr: { contains: search } },
-        { sku: { contains: search } },
+        { name: textMatch(search) },
+        { nameAr: textMatch(search) },
+        { sku: textMatch(search) },
       ]
     }
     if (category) where.categoryId = category
     if (status) where.status = status
 
-    const orderBy: any = (() => {
+    const orderBy = (() => {
       switch (sortBy) {
         case "price-asc": return { price: "asc" as const }
         case "price-desc": return { price: "desc" as const }
@@ -115,8 +117,8 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json(product)
-  } catch (error: any) {
-    if (error?.code === "P2002") {
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       return NextResponse.json({ error: "الـ slug موجود بالفعل" }, { status: 400 })
     }
     return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })

@@ -3,31 +3,22 @@ import bcrypt from "bcryptjs"
 import { prisma } from "@/lib/prisma"
 import { isSettingEnabled } from "@/lib/settings"
 import { notifyMany, NOTIFICATION_TYPE } from "@/lib/notifications"
-import { checkRateLimit, RATE_LIMITS } from "@/lib/rate-limit"
+import { clientIp, enforceRateLimit, RateLimitError } from "@/lib/api/rate-limit"
+import { firstIssueMessage, registerSchema } from "@/lib/validation"
+
+const REGISTER_RATE = { limit: 5, windowMs: 10 * 60 * 1000 }
 
 export async function POST(req: NextRequest) {
   try {
-    const ip = req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip") || "unknown"
-    const rl = checkRateLimit(`register:${ip}`, RATE_LIMITS.registration)
-    if (!rl.allowed) {
-      return NextResponse.json({ error: "تم تجاوز الحد المسموح. حاول لاحقًا." }, { status: 429 })
-    }
+    // Phase 3: brute-force / spam protection per IP.
+    enforceRateLimit(`register:${clientIp(req)}`, REGISTER_RATE.limit, REGISTER_RATE.windowMs)
 
     const body = await req.json()
-    const { name, email, password, phone, ref } = body
-
-    if (!name || !email || !password) {
-      return NextResponse.json({ error: "جميع الحقول مطلوبة" }, { status: 400 })
+    const parsed = registerSchema.safeParse(body)
+    if (!parsed.success) {
+      return NextResponse.json({ error: firstIssueMessage(parsed.error) }, { status: 400 })
     }
-
-    if (password.length < 6) {
-      return NextResponse.json({ error: "كلمة المرور يجب أن تكون 6 أحرف على الأقل" }, { status: 400 })
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    if (!emailRegex.test(email)) {
-      return NextResponse.json({ error: "البريد الإلكتروني غير صحيح" }, { status: 400 })
-    }
+    const { name, email, password, phone, ref } = parsed.data
 
     const existingUser = await prisma.user.findUnique({ where: { email } })
     if (existingUser) {
@@ -52,6 +43,7 @@ export async function POST(req: NextRequest) {
         phone,
         referredBy: referredById,
       },
+      select: { id: true },
     })
 
     // Notify admins about the new affiliate (respecting notification settings)
@@ -70,8 +62,15 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ message: "تم التسجيل بنجاح", userId: user.id })
-  } catch (error: any) {
-    console.error("Register error:", error)
-    return NextResponse.json({ error: error?.message || "خطأ في الخادم" }, { status: 500 })
+  } catch (error) {
+    if (error instanceof RateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: 429, headers: { "Retry-After": String(error.retryAfterSeconds) } },
+      )
+    }
+    console.error("Register error")
+    // Phase 3: never leak exception internals to the client.
+    return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })
   }
 }

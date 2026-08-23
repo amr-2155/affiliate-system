@@ -2,6 +2,7 @@ import { NextAuthOptions } from "next-auth"
 import CredentialsProvider from "next-auth/providers/credentials"
 import bcrypt from "bcryptjs"
 import { prisma } from "./prisma"
+import { clientIp, enforceRateLimit } from "@/lib/api/rate-limit"
 
 const secret = process.env.NEXTAUTH_SECRET
 if (!secret || secret.length < 32) {
@@ -11,6 +12,10 @@ if (!secret || secret.length < 32) {
   )
 }
 
+// Phase 3: brute-force protection.
+const LOGIN_IP_RATE = { limit: 15, windowMs: 5 * 60 * 1000 }
+const LOGIN_EMAIL_RATE = { limit: 5, windowMs: 5 * 60 * 1000 }
+
 export const authOptions: NextAuthOptions = {
   providers: [
     CredentialsProvider({
@@ -19,13 +24,24 @@ export const authOptions: NextAuthOptions = {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" }
       },
-      async authorize(credentials) {
+      async authorize(credentials, req) {
         if (!credentials?.email || !credentials?.password) {
           throw new Error("Invalid credentials")
         }
 
+        const email = credentials.email.trim().toLowerCase()
+        const ip = clientIp(req as unknown as Request)
+
+        // Two budgets: per source IP (spraying) and per account (stuffing).
+        try {
+          enforceRateLimit(`login-ip:${ip}`, LOGIN_IP_RATE.limit, LOGIN_IP_RATE.windowMs)
+          enforceRateLimit(`login-email:${email}`, LOGIN_EMAIL_RATE.limit, LOGIN_EMAIL_RATE.windowMs)
+        } catch {
+          throw new Error("محاولات كثيرة جدًا — أعد المحاولة بعد قليل")
+        }
+
         const user = await prisma.user.findUnique({
-          where: { email: credentials.email }
+          where: { email }
         })
 
         if (!user || user.status !== "ACTIVE") {

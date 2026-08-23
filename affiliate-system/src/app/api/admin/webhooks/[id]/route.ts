@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { requireAdminPermission, logActivity } from "@/lib/admin-guard"
 import { testWebhookConnection } from "@/lib/events"
+import { assertPublicWebhookUrl } from "@/lib/api/ssrf"
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -14,6 +15,13 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     if (!existing) return NextResponse.json({ error: "غير موجود" }, { status: 404 })
 
     const body = await req.json()
+    // Phase 3: SSRF guard — webhook targets must be public http(s) URLs.
+    if (body.url !== undefined) {
+      const check = assertPublicWebhookUrl(body.url)
+      if (!check.ok) {
+        return NextResponse.json({ error: check.error }, { status: 400 })
+      }
+    }
     const data: any = {}
     if (body.name !== undefined) data.name = body.name.trim()
     if (body.url !== undefined) data.url = body.url.trim()

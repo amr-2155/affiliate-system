@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { Prisma } from "@/generated/prisma/client"
 import bcrypt from "bcryptjs"
 import { requireAdminPermission, logActivity } from "@/lib/admin-guard"
+import { textMatch } from "@/lib/text-search"
 import { parsePermissions } from "@/lib/permissions"
 
 export async function GET(req: NextRequest) {
@@ -15,12 +17,12 @@ export async function GET(req: NextRequest) {
     const page = Math.max(1, parseInt(searchParams.get("page") || "1"))
     const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "20")))
 
-    const where: any = { role: "ADMIN" }
+    const where: Prisma.UserWhereInput = { role: "ADMIN" }
     if (search) {
       where.OR = [
-        { name: { contains: search } },
-        { email: { contains: search } },
-        { phone: { contains: search } },
+        { name: textMatch(search) },
+        { email: textMatch(search) },
+        { phone: textMatch(search) },
       ]
     }
     if (status) where.status = status
@@ -42,7 +44,7 @@ export async function GET(req: NextRequest) {
     ])
 
     return NextResponse.json({
-      managers: managers.map((m: any) => ({
+      managers: managers.map((m: (typeof managers)[number]) => ({
         ...m,
         permissions: parsePermissions(m.permissions),
         permissionsCount: parsePermissions(m.permissions).length,

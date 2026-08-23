@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { requireAdminPermission, actorCan } from "@/lib/admin-guard"
+import { textMatch } from "@/lib/text-search"
+import { rawDateToIso } from "@/lib/raw-dates"
 
 export async function GET(req: NextRequest) {
   try {
@@ -21,16 +23,22 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ products: [], orders: [], affiliates: [], customers: [] })
     }
 
+    // Portable raw SQL: the tagged template lets Prisma pick the correct
+    // placeholder syntax per provider (? on SQLite, $n on PostgreSQL) and
+    // binds every value as a parameter — no string interpolation of user input.
+    // LOWER(...) keeps LIKE case-insensitivity identical on both databases
+    // while leaving Arabic text untouched.
+    const like = `%${q}%`
     const [products, orders, affiliates, customers] = await Promise.all([
       canProducts
         ? prisma.product.findMany({
             where: {
               OR: [
-                { name: { contains: q } },
-                { nameAr: { contains: q } },
-                { sku: { contains: q } },
+                { name: textMatch(q) },
+                { nameAr: textMatch(q) },
+                { sku: textMatch(q) },
               ],
-            } as any,
+            },
             take: 5,
             select: { id: true, nameAr: true, name: true, image: true, price: true, sku: true },
             orderBy: { createdAt: "desc" },
@@ -40,11 +48,11 @@ export async function GET(req: NextRequest) {
         ? prisma.order.findMany({
             where: {
               OR: [
-                { orderNumber: { contains: q } },
-                { customerName: { contains: q } },
-                { customerPhone: { contains: q } },
+                { orderNumber: textMatch(q) },
+                { customerName: textMatch(q) },
+                { customerPhone: textMatch(q) },
               ],
-            } as any,
+            },
             take: 5,
             select: { id: true, orderNumber: true, customerName: true, total: true, status: true },
             orderBy: { createdAt: "desc" },
@@ -55,18 +63,18 @@ export async function GET(req: NextRequest) {
             where: {
               role: "AFFILIATE",
               OR: [
-                { name: { contains: q } },
-                { email: { contains: q } },
-                { referralCode: { contains: q } },
+                { name: textMatch(q) },
+                { email: textMatch(q) },
+                { referralCode: textMatch(q) },
               ],
-            } as any,
+            },
             take: 5,
             select: { id: true, name: true, email: true, referralCode: true },
             orderBy: { createdAt: "desc" },
           })
         : Promise.resolve([]),
       canCustomers
-        ? prisma.$queryRawUnsafe<any[]>(`
+        ? prisma.$queryRaw<{ phone: string; name: string; orderCount: unknown; totalValue: unknown; lastOrderAt: unknown }[]>`
             SELECT phone, name, orderCount, totalValue, lastOrderAt FROM (
               SELECT
                 customerPhone AS phone,
@@ -76,11 +84,11 @@ export async function GET(req: NextRequest) {
                 MAX(createdAt) OVER (PARTITION BY customerPhone) AS lastOrderAt,
                 ROW_NUMBER() OVER (PARTITION BY customerPhone ORDER BY createdAt DESC) AS rn
               FROM "Order"
-              WHERE customerPhone LIKE ? OR customerName LIKE ?
+              WHERE LOWER(customerPhone) LIKE LOWER(${like}) OR LOWER(customerName) LIKE LOWER(${like})
             ) WHERE rn = 1
             ORDER BY lastOrderAt DESC
             LIMIT 5
-          `, `%${q}%`, `%${q}%`)
+          `
         : Promise.resolve([]),
     ])
 
@@ -88,13 +96,13 @@ export async function GET(req: NextRequest) {
       products,
       orders,
       affiliates,
-      customers: customers.map((row: any) => ({
+      customers: customers.map((row) => ({
         id: `cust_${row.phone}`,
         name: row.name,
         phone: row.phone,
         orderCount: Number(row.orderCount),
         totalValue: Number(row.totalValue || 0),
-        lastOrderAt: new Date(Number(row.lastOrderAt)).toISOString(),
+        lastOrderAt: rawDateToIso(row.lastOrderAt),
       })),
     })
   } catch (error) {

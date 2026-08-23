@@ -2,12 +2,14 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
+import { zonedStartOfDay, zonedStartOfMonth, addDays } from "@/lib/time"
 
 function periodRange(period: string): Date {
+  // Cairo-time boundaries (see src/lib/time.ts — identical to prior local-time behavior)
   const now = new Date()
-  if (period === "today") return new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  if (period === "week") return new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6)
-  return new Date(now.getFullYear(), now.getMonth(), 1)
+  if (period === "today") return zonedStartOfDay(now)
+  if (period === "week") return addDays(zonedStartOfDay(now), -6)
+  return zonedStartOfMonth(now)
 }
 
 export async function GET(req: NextRequest) {
@@ -38,7 +40,8 @@ export async function GET(req: NextRequest) {
             by: ["productId"],
             where: { orderId: { in: orderIds } },
             _sum: { quantity: true, total: true },
-            orderBy: { _sum: { total: "desc" } },
+            // Deterministic tiebreak for equal totals
+            orderBy: [{ _sum: { total: "desc" } }, { productId: "asc" }],
           })
         : []
 

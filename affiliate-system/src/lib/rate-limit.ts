@@ -10,13 +10,15 @@ interface RateLimitEntry {
 
 const store = new Map<string, RateLimitEntry>()
 
-// Cleanup stale entries every 5 minutes
-setInterval(() => {
+// Cleanup stale entries every 5 minutes.
+// unref'd so the timer never keeps a process (e.g. test runner) alive on its own.
+const cleanupTimer = setInterval(() => {
   const now = Date.now()
   for (const [key, entry] of store) {
     if (entry.resetAt <= now) store.delete(key)
   }
-}, 5 * 60 * 1000)
+}, 5 * 60 * 1000) as unknown as { unref?: () => void }
+cleanupTimer.unref?.()
 
 export interface RateLimitConfig {
   windowMs: number

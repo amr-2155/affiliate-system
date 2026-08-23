@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { Prisma } from "@/generated/prisma/client"
 import { requireAdminPermission } from "@/lib/admin-guard"
+import { textMatch } from "@/lib/text-search"
 
 export async function GET(req: NextRequest) {
   try {
@@ -13,15 +15,15 @@ export async function GET(req: NextRequest) {
     const page = Math.max(1, parseInt(searchParams.get("page") || "1"))
     const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "20")))
 
-    const where: any = {}
+    const where: Prisma.OrderWhereInput = {}
     if (status) where.status = status
     if (search) {
       where.OR = [
-        { orderNumber: { contains: search } },
-        { customerName: { contains: search } },
-        { customerPhone: { contains: search } },
-        { customerEmail: { contains: search } },
-        { customerCity: { contains: search } },
+        { orderNumber: textMatch(search) },
+        { customerName: textMatch(search) },
+        { customerPhone: textMatch(search) },
+        { customerEmail: textMatch(search) },
+        { customerCity: textMatch(search) },
       ]
     }
 

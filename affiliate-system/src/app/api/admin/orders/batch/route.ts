@@ -4,7 +4,12 @@ import { requireAdminPermission, logActivity } from "@/lib/admin-guard"
 import { formatCurrency, getStatusText } from "@/lib/utils"
 import { canTransitionOrder, TERMINAL_STATUSES } from "@/lib/order-state"
 import { notify, NOTIFICATION_TYPE } from "@/lib/notifications"
-import { settleBonusesForOrder, revokeBonusesForOrder, BONUS_COUNT_STATUSES, BONUS_REVOKE_STATUSES, BONUS_NON_EARNING_STATUSES } from "@/lib/supplier-bonus"
+import {
+  applyOrderTransition,
+  OrderStateError,
+  qualifiesForIncentive,
+} from "@/lib/order-service"
+import { evaluateAffiliateRewards } from "@/lib/incentives"
 
 export async function PUT(req: NextRequest) {
   try {
@@ -21,7 +26,6 @@ export async function PUT(req: NextRequest) {
       select: { id: true, status: true, orderNumber: true, affiliateId: true },
     })
 
-    // Validate transitions for all orders
     const invalidOrders: string[] = []
     for (const order of existing) {
       if (order.status === status) continue
@@ -37,73 +41,59 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: `لا يمكن تحديث الطلبات: ${invalidOrders.join(", ")}` }, { status: 400 })
     }
 
-    const data: any = { status }
-    if (status === "DELIVERED") data.deliveredAt = new Date()
-    if (status === "CANCELLED") data.cancelledAt = new Date()
-    if (status === "COLLECTED") data.collectedAt = new Date()
+    const succeeded: string[] = []
+    const failed: { id: string; error: string }[] = []
 
-    const result = await prisma.order.updateMany({
-      where: { id: { in: ids } },
-      data,
-    })
-
-    // بونص حملة الموردين لكل طلب يدخل التسليم/التحصيل أو يخرج منهما.
     for (const order of existing) {
-      if (order.status !== status) {
-        if ((BONUS_COUNT_STATUSES as readonly string[]).includes(status)) {
-          settleBonusesForOrder(order.id).catch((e) => console.error("supplier bonus settle failed", e))
-        }
-        if ((BONUS_REVOKE_STATUSES as readonly string[]).includes(status) || (BONUS_NON_EARNING_STATUSES as readonly string[]).includes(status)) {
-          revokeBonusesForOrder(order.id).catch((e) => console.error("supplier bonus revoke failed", e))
-        }
+      if (order.status === status) {
+        succeeded.push(order.id)
+        continue
       }
-    }
+      try {
+        const transition = await applyOrderTransition({
+          orderId: order.id,
+          to: status,
+          source: "batch",
+          actorId: guard.actor.id,
+        })
 
-    // Credit commissions for orders entering COLLECTED, revert for orders leaving it
-    for (const order of existing) {
-      if (order.status !== status) {
         await logActivity(
           guard.actor.id,
           "ORDER_STATUS_CHANGED",
           "orders",
-          JSON.stringify({ orderId: order.id, from: order.status, to: status }),
-          order.id
+          JSON.stringify({ orderId: order.id, from: transition.from, to: transition.to }),
+          order.id,
         )
-      }
-      const prevCollected = order.status === "COLLECTED"
-      const newCollected = status === "COLLECTED"
-      if (prevCollected === newCollected) continue
 
-      const agg = await prisma.commissionLog.aggregate({
-        where: { orderId: order.id },
-        _sum: { amount: true },
-      })
-      const commission = agg._sum.amount || 0
-      if (commission <= 0) continue
+        if (qualifiesForIncentive(status)) {
+          evaluateAffiliateRewards(order.affiliateId).catch((e) =>
+            console.error("incentive eval failed", e),
+          )
+        }
 
-      if (newCollected) {
-        await prisma.user.update({
-          where: { id: order.affiliateId },
-          data: { balance: { increment: commission }, totalEarnings: { increment: commission } },
-        })
-        notify({
-          title: "تم تحصيل العمولة",
-          message: `تم تحصيل عمولة طلب ${order.orderNumber} بقيمة ${formatCurrency(commission)} وأصبحت متاحة للسحب`,
-          type: NOTIFICATION_TYPE.EARNINGS,
-          userId: order.affiliateId,
-          link: "/dashboard",
-          relatedId: order.id,
-        })
-      } else {
-        await prisma.user.update({
-          where: { id: order.affiliateId },
-          data: { balance: { decrement: commission }, totalEarnings: { decrement: commission } },
-        })
+        if (transition.commissionCredited > 0) {
+          notify({
+            title: "تم تحصيل العمولة",
+            message: `تم تحصيل عمولة طلب ${order.orderNumber} بقيمة ${formatCurrency(transition.commissionCredited)} وأصبحت متاحة للسحب`,
+            type: NOTIFICATION_TYPE.EARNINGS,
+            userId: order.affiliateId,
+            link: "/dashboard",
+            relatedId: order.id,
+          })
+        }
+
+        succeeded.push(order.id)
+      } catch (e) {
+        const msg = e instanceof OrderStateError ? e.message : "خطأ في الخادم"
+        failed.push({ id: order.id, error: msg })
       }
     }
 
-    return NextResponse.json({ updated: result.count })
-  } catch (error) {
+    return NextResponse.json({
+      updated: succeeded.length,
+      failed: failed.length > 0 ? failed : undefined,
+    })
+  } catch {
     return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })
   }
 }

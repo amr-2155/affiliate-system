@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/prisma"
 import { formatCurrency } from "@/lib/utils"
 import { notify, NOTIFICATION_TYPE } from "@/lib/notifications"
+import { zonedStartOfRelativeMonth } from "@/lib/time"
+import { Prisma } from "@/generated/prisma/client"
 
 /** حالات الأوردرات الصالحة فقط للاحتساب في الحوافز: تم التسليم/التحصيل فعليًا. */
 export const INCENTIVE_COUNT_STATUSES = ["DELIVERED", "COLLECTED"] as const
@@ -12,11 +14,15 @@ export interface IncentiveLevel {
 
 export function parseLevels(levels: string | null | undefined): IncentiveLevel[] {
   try {
-    const parsed = JSON.parse(levels || "[]")
+    const parsed: unknown = JSON.parse(levels || "[]")
     if (!Array.isArray(parsed)) return []
-    return parsed
-      .filter((l: any) => l && Number.isFinite(Number(l.threshold)) && Number.isFinite(Number(l.reward)))
-      .map((l: any) => ({ threshold: Number(l.threshold), reward: Number(l.reward) }))
+    return (parsed as unknown[])
+      .map((row) => (row && typeof row === "object" ? (row as Record<string, unknown>) : null))
+      .filter((row): row is Record<string, unknown> =>
+        row !== null
+        && Number.isFinite(Number(row.threshold))
+        && Number.isFinite(Number(row.reward)))
+      .map((row) => ({ threshold: Number(row.threshold), reward: Number(row.reward) }))
       .sort((a: IncentiveLevel, b: IncentiveLevel) => a.threshold - b.threshold)
   } catch {
     return []
@@ -111,6 +117,45 @@ export async function getActiveCampaignsForAffiliate(affiliateId: string) {
 }
 
 /**
+ * Atomically claim a milestone for (campaign, affiliate).
+ *
+ * Concurrency-safe under PostgreSQL READ COMMITTED: the read-modify-write of
+ * `milestonesNotified` is gated by an optimistic conditional updateMany on the
+ * exact previously-read value; a concurrent writer flips count to 0 and we
+ * retry with a fresh read. Returns true exactly once per milestone —
+ * duplicates get false instead of double-notifying.
+ */
+export async function claimMilestone(campaignId: string, affiliateId: string, milestone: string): Promise<boolean> {
+  const MAX_ATTEMPTS = 4
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const target = await tx.incentiveTarget.upsert({
+          where: { campaignId_affiliateId: { campaignId, affiliateId } },
+          create: { campaignId, affiliateId },
+          update: {},
+        })
+        let notified: string[] = []
+        try {
+          notified = JSON.parse(target.milestonesNotified || "[]")
+        } catch {
+          notified = []
+        }
+        if (notified.includes(milestone)) return false
+        const gate = await tx.incentiveTarget.updateMany({
+          where: { id: target.id, milestonesNotified: target.milestonesNotified },
+          data: { milestonesNotified: JSON.stringify([...notified, milestone]) },
+        })
+        return gate.count === 1
+      })
+    } catch {
+      // P2002 (upsert create race) or serialization retry → fresh read next loop
+    }
+  }
+  return false
+}
+
+/**
  * تقييم إنجازات المسوق في كل حملة نشطة وإنشاء المكافآت المستحقة مرة واحدة فقط
  * (منع التكرار عبر القيد الفريد campaignId+affiliateId+levelIndex).
  * يُستدعى عند وصول طلب إلى حالة تسليم/تحصيل وعند فتح لوحة المسوق.
@@ -156,8 +201,8 @@ export async function evaluateAffiliateRewards(affiliateId: string): Promise<{ c
           relatedId: campaign.id,
         })
         created++
-      } catch (e: any) {
-        if (e?.code === "P2002") continue
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") continue
         throw e
       }
     }
@@ -167,19 +212,9 @@ export async function evaluateAffiliateRewards(affiliateId: string): Promise<{ c
     if (!nextLevel || nextLevel.threshold <= 0) continue
     if ((current / nextLevel.threshold) * 100 < 90) continue
 
-    const target = await prisma.incentiveTarget.upsert({
-      where: { campaignId_affiliateId: { campaignId: campaign.id, affiliateId } },
-      create: { campaignId: campaign.id, affiliateId },
-      update: {},
-    })
-    let notified: string[] = []
-    try {
-      notified = JSON.parse(target.milestonesNotified || "[]")
-    } catch {
-      notified = []
-    }
-    const milestone = "90"
-    if (notified.includes(milestone)) continue
+    // Atomic claim — concurrent evaluations notify exactly once (PG-safe).
+    const claimed = await claimMilestone(campaign.id, affiliateId, "90")
+    if (!claimed) continue
     const remaining = Math.max(1, Math.ceil(nextLevel.threshold - current))
     notify({
       title: "أنت قريب جدًا من الهدف 🎯",
@@ -188,10 +223,6 @@ export async function evaluateAffiliateRewards(affiliateId: string): Promise<{ c
       userId: affiliateId,
       link: "/dashboard",
       relatedId: campaign.id,
-    })
-    await prisma.incentiveTarget.update({
-      where: { id: target.id },
-      data: { milestonesNotified: JSON.stringify([...notified, milestone]) },
     })
     reminders++
   }
@@ -244,8 +275,9 @@ export async function getAffiliateChallenges(affiliateId: string) {
 
 export async function getLeaderboard(limit = 10) {
   const now = new Date()
-  const start = new Date(now.getFullYear(), now.getMonth(), 1)
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+  // Cairo-time month window (see src/lib/time.ts — identical to prior local-time behavior)
+  const start = zonedStartOfRelativeMonth(now, 0)
+  const end = zonedStartOfRelativeMonth(now, 1)
   const orders = await prisma.order.findMany({
     where: { status: { in: [...INCENTIVE_COUNT_STATUSES] }, createdAt: { gte: start, lt: end } },
     select: { affiliateId: true, total: true },

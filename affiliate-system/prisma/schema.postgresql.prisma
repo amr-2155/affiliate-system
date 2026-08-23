@@ -1,0 +1,670 @@
+// POSTGRESQL STAGING SCHEMA - Phase 16.
+// Derived 1:1 from prisma/schema.prisma (SQLite file, untouched). Financial fields stay Float (double precision).
+// Client outputs to the SAME directory (single-flavor client); restore SQLite flavor via: npm run db:generate:sqlite
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("STAGING_DATABASE_URL")
+}
+
+model User {
+  id             String    @id @default(cuid())
+  name           String
+  email          String    @unique
+  password       String
+  phone          String?
+  avatar         String?
+  role           String    @default("AFFILIATE")
+  status         String    @default("ACTIVE")
+  commissionRate Float     @default(10)
+  balance        Float     @default(0)
+  totalEarnings  Float     @default(0)
+  referralCode   String    @unique @default(cuid())
+  referredBy     String?
+  lastLogin      DateTime?
+  permissions    String    @default("[]")
+  isSuperAdmin   Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  orders          Order[]
+  favorites       Favorite[]
+  notifications   Notification[]
+  withdrawals     Withdrawal[]
+  suggestions     ProductSuggestion[]
+  commissionLogs  CommissionLog[]
+  orderComments   OrderComment[]
+  assignedOrders  Order[]             @relation("OrderReviewer")
+  confirmedOrders Order[]             @relation("OrderConfirmer")
+  adminActivities AdminActivity[]
+  stockRefillRequests    StockRefillRequest[] @relation("StockRefillAffiliate")
+  processedRefillRequests StockRefillRequest[] @relation("StockRefillProcessor")
+  incentiveTargets       IncentiveTarget[]    @relation("IncentiveAffiliate")
+  incentiveRewards       IncentiveReward[]    @relation("IncentiveRewardAffiliate")
+  processedIncentiveRewards IncentiveReward[] @relation("IncentiveRewardProcessor")
+  marketingStrategies    MarketingStrategy[]
+  supplierReferrals      SupplierReferral[]
+  bonusLedger            BonusLedger[] @relation("BonusAffiliate")
+
+  @@index([role, status])
+  @@index([role])
+}
+
+model Category {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  nameAr    String
+  slug      String     @unique
+  icon      String?
+  image     String?
+  parentId  String?
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children  Category[] @relation("CategoryTree")
+  products  Product[]
+  createdAt DateTime   @default(now())
+}
+
+model Product {
+  id                  String   @id @default(cuid())
+  name                String
+  nameAr              String
+  slug                String   @unique
+  description         String?
+  descriptionAr       String?
+  price               Float
+  comparePrice        Float?
+  minPrice            Float?
+  costPrice           Float
+  affiliateCostPrice  Float?
+  sku                 String?
+  barcode             String?
+  image               String?
+  images              String   @default("[]")
+  stock               Int      @default(0)
+  lowStockThreshold   Int      @default(5)
+  status              String   @default("ACTIVE")
+  isVisible           Boolean  @default(true)
+  commissionRate      Float?
+  categoryId          String
+  category            Category @relation(fields: [categoryId], references: [id])
+  easyOrderId         String?
+  weight              Float?
+  dimensions          String?
+  lockedToAffiliates  String   @default("[]")
+  autoAssignReviewers Boolean  @default(false)
+  mediaUrl           String?
+  deletedAt          DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  orderItems    OrderItem[]
+  favorites     Favorite[]
+  suggestions   ProductSuggestion[]
+  variants      ProductVariant[]
+  galleryImages ProductGalleryImage[]
+  stockRefillRequests StockRefillRequest[]
+  stockLogs            StockLog[]
+  marketingStrategies  MarketingStrategy[]
+  supplierReferralId   String?
+  supplierReferral     SupplierReferral? @relation(fields: [supplierReferralId], references: [id], onDelete: SetNull)
+
+  @@index([categoryId])
+  @@index([categoryId, status])
+  @@index([isVisible])
+  @@index([status])
+}
+
+model ProductVariant {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name      String
+  type      String   @default("color")
+  value     String
+  price     Float?
+  stock     Int      @default(0)
+  sku       String?
+  image     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model ProductGalleryImage {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  alt       String?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+model Order {
+  id                   String    @id @default(cuid())
+  orderNumber          String    @unique
+  status               String    @default("PENDING")
+  paymentStatus        String    @default("PENDING")
+  subtotal             Float
+  shippingCost         Float     @default(0)
+  discount             Float     @default(0)
+  total                Float
+  currency             String    @default("EGP")
+  customerName         String
+  customerPhone        String
+  customerEmail        String?
+  customerAddress      String
+  customerCity         String
+  customerGovernorate  String?
+  notes                String?
+  internalNotes        String?
+  trackingNumber       String?
+  affiliateId          String
+  affiliate            User      @relation(fields: [affiliateId], references: [id])
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  deliveredAt          DateTime?
+  cancelledAt          DateTime?
+  collectedAt          DateTime?
+  cancelReason         String?
+  confirmationDeadline DateTime?
+
+  items    OrderItem[]
+  comments OrderComment[]
+  images   OrderImage[]
+
+  reviewerId    String?
+  reviewer      User?     @relation("OrderReviewer", fields: [reviewerId], references: [id])
+  confirmedById String?
+  confirmedBy   User?     @relation("OrderConfirmer", fields: [confirmedById], references: [id])
+  assignedAt    DateTime?
+  confirmedAt   DateTime?
+
+  confirmationAttempts ConfirmationAttempt[]
+  shipments            Shipment[]
+
+  @@index([affiliateId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([customerPhone])
+  @@index([reviewerId])
+  @@index([confirmedById])
+  @@index([confirmationDeadline])
+}
+
+model AdminActivity {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String
+  module    String
+  details   String?
+  orderId   String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, createdAt])
+  @@index([orderId])
+}
+
+model StockRefillRequest {
+  id           String    @id @default(cuid())
+  productId    String
+  product      Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  affiliateId  String
+  affiliate    User      @relation("StockRefillAffiliate", fields: [affiliateId], references: [id], onDelete: Cascade)
+  requestedQty Int       @default(0)
+  currentStock Int       @default(0)
+  status       String    @default("PENDING")
+  reason       String?
+  processedById String?
+  processedBy  User?     @relation("StockRefillProcessor", fields: [processedById], references: [id])
+  processedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  stockLogs StockLog[]
+
+  @@index([status])
+  @@index([affiliateId, status])
+  @@index([productId, status])
+}
+
+model StockLog {
+  id             String             @id @default(cuid())
+  productId      String
+  product        Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  type           String             @default("REFILL")
+  quantityChange Int
+  stockAfter     Int
+  note           String?
+  actorId        String?
+  requestId      String?
+  request        StockRefillRequest? @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  createdAt      DateTime           @default(now())
+
+  @@index([productId])
+  @@index([productId, createdAt])
+}
+
+model IncentiveCampaign {
+  id           String   @id @default(cuid())
+  name         String
+  description  String?
+  goalType     String   @default("ORDER_COUNT") // ORDER_COUNT | SALES_VALUE | POINTS
+  goalValue    Float    @default(0)
+  rewardType   String   @default("LEVELS") // ONCE | LEVELS
+  levels       String   @default("[]") // JSON [{ threshold, reward }]
+  rewardAmount Float?
+  startDate    DateTime
+  endDate      DateTime
+  targetType   String   @default("ALL") // ALL | SPECIFIC
+  status       String   @default("ACTIVE") // ACTIVE | PAUSED | ENDED
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  targets IncentiveTarget[]
+  rewards IncentiveReward[]
+
+  @@index([status])
+  @@index([isActive])
+  @@index([startDate, endDate])
+}
+
+model IncentiveTarget {
+  id                 String   @id @default(cuid())
+  campaignId         String
+  campaign           IncentiveCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  affiliateId        String
+  affiliate          User     @relation("IncentiveAffiliate", fields: [affiliateId], references: [id], onDelete: Cascade)
+  milestonesNotified String   @default("[]")
+  joinedAt           DateTime @default(now())
+
+  @@unique([campaignId, affiliateId])
+  @@index([affiliateId])
+}
+
+model IncentiveReward {
+  id            String             @id @default(cuid())
+  campaignId    String
+  campaign      IncentiveCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  affiliateId   String
+  affiliate     User               @relation("IncentiveRewardAffiliate", fields: [affiliateId], references: [id], onDelete: Cascade)
+  levelIndex    Int                @default(0)
+  threshold     Float
+  amount        Float
+  status        String             @default("DUE") // DUE | REVIEW | PAID
+  notes         String?
+  reviewedAt    DateTime?
+  paidAt        DateTime?
+  processedById String?
+  processedBy   User?              @relation("IncentiveRewardProcessor", fields: [processedById], references: [id])
+  processedAt   DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@unique([campaignId, affiliateId, levelIndex])
+  @@index([affiliateId])
+  @@index([status])
+  @@index([campaignId, status])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  quantity  Int
+  unitPrice Float
+  total     Float
+  note      String?
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model OrderComment {
+  id        String   @id @default(cuid())
+  content   String
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model OrderImage {
+  id        String   @id @default(cuid())
+  url       String
+  alt       String?
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}
+
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  title     String
+  message   String
+  type      String   @default("INFO")
+  read      Boolean  @default(false)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  link      String?
+  relatedId String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+  @@index([userId, createdAt])
+}
+
+/** ط¹ط¯ظ‘ط§ط¯ طھط³ظ„ط³ظ„ظٹ ط°ط±ظٹ ظ„ط£ط±ظ‚ط§ظ… ط§ظ„ط·ظ„ط¨ط§طھ â€” ظ‚ظٹظ…طھظ‡ طھط²ظٹط¯ ط¨ظ…ظ‚ط¯ط§ط± 1 ظ…ط¹ ظƒظ„ ط·ظ„ط¨ ط¬ط¯ظٹط¯. */
+model OrderCounter {
+  id    String @id @default(cuid())
+  value Int    @default(0)
+}
+
+/** ط®ط·ط© طھط³ظˆظٹظ‚ظٹط© ظ…ط­ظپظˆط¸ط© ط£ظڈظ†ط´ط¦طھ ط¨ظˆط§ط³ط·ط© ط§ظ„ظ…ط³ظˆظ‚ ظ„ظ…ظ†طھط¬ ظ…ط¹ظٹظ‘ظ†. */
+model MarketingStrategy {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  title           String
+  scenario        String   @default("realistic")
+  content         String
+  productSnapshot String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+  @@index([productId])
+  @@index([userId, createdAt])
+}
+
+model Withdrawal {
+  id            String    @id @default(cuid())
+  amount        Float
+  status        String    @default("PENDING")
+  method        String    @default("BANK_TRANSFER")
+  accountName   String?
+  accountNumber String?
+  bankName      String?
+  notes         String?
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  proofImage    String?
+  processedAt   DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([userId])
+  @@index([status])
+}
+
+model ProductSuggestion {
+  id          String   @id @default(cuid())
+  productName String
+  productUrl  String?
+  description String?
+  reason      String?
+  status      String   @default("PENDING")
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  productId   String?
+  product     Product? @relation(fields: [productId], references: [id])
+  adminNotes  String?
+  createdAt   DateTime @default(now())
+}
+
+model CommissionLog {
+  id        String   @id @default(cuid())
+  amount    Float
+  orderId   String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, createdAt])
+}
+
+model ShippingRate {
+  id            String   @id @default(cuid())
+  governorate   String   @unique
+  rate          Float
+  freeAbove     Float?
+  estimatedDays Int      @default(3)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+}
+
+model SystemSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model ConfirmationAttempt {
+  id                String   @id @default(cuid())
+  orderId           String
+  order             Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  attemptNumber     Int
+  channel           String   @default("WHATSAPP")
+  status            String   @default("ATTEMPTED")
+  result            String?
+  error             String?
+  provider          String?
+  externalMessageId String?
+  createdAt         DateTime @default(now())
+
+  @@index([orderId])
+  @@index([orderId, attemptNumber])
+}
+
+model Webhook {
+  id             String    @id @default(cuid())
+  name           String
+  url            String
+  secret         String?
+  enabled        Boolean   @default(true)
+  events         String    @default("[]")
+  timeoutMs      Int       @default(10000)
+  maxRetries     Int       @default(3)
+  lastDeliveryAt DateTime?
+  lastStatus     String?
+  lastStatusText String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([enabled])
+}
+
+model WebhookDelivery {
+  id             String    @id @default(cuid())
+  webhookId      String
+  webhook        Webhook   @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  event          String
+  idempotencyKey String    @unique
+  payload        String
+  status         String    @default("PENDING")
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(3)
+  nextRetryAt    DateTime?
+  responseStatus Int?
+  responseBody   String?
+  error          String?
+  createdAt      DateTime  @default(now())
+  deliveredAt    DateTime?
+
+  @@index([status])
+  @@index([nextRetryAt])
+  @@index([webhookId, createdAt])
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  name        String
+  keyPrefix   String
+  keyHash     String    @unique
+  permissions String    @default("[]")
+  enabled     Boolean   @default(true)
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  @@index([enabled])
+}
+
+model ShippingProvider {
+  id             String    @id @default(cuid())
+  name           String
+  code           String    @unique
+  baseUrl        String?
+  apiKey         String?
+  apiSecret      String?
+  enabled        Boolean   @default(false)
+  testStatus     String?   @default("NOT_TESTED")
+  testStatusText String?
+  lastTestAt     DateTime?
+  config         String    @default("{}")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  shipments Shipment[]
+
+  @@index([code])
+}
+
+model Shipment {
+  id                 String           @id @default(cuid())
+  orderId            String
+  order              Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  providerId         String
+  provider           ShippingProvider @relation(fields: [providerId], references: [id])
+  providerShipmentId String?
+  trackingNumber     String?
+  trackingUrl        String?
+  status             String           @default("CREATED")
+  labelUrl           String?
+  lastStatusAt       DateTime?
+  error              String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([orderId])
+  @@index([providerId])
+  @@index([trackingNumber])
+}
+
+/** ظ…ظˆط±ط¯ ظ…ط±ط´ظژظ‘ط­ ظ…ظ† ظ…ط³ظˆظ‚ ط¶ظ…ظ† ط­ظ…ظ„ط© "ط£ط¶ظپ ظ…ظˆط±ط¯ظ‹ط§ ظˆط§ط±ط¨ط­" â€” ط£ظˆظ„ ظ…ظ† ط±ط´ظ‘ط­ ط§ظ„ظ…ظˆط±ط¯ ظ‡ظˆ طµط§ط­ط¨ ط§ظ„ط¥ط­ط§ظ„ط©. */
+model SupplierReferral {
+  id               String   @id @default(cuid())
+  affiliateId      String
+  affiliate        User     @relation(fields: [affiliateId], references: [id], onDelete: Cascade)
+  supplierName     String
+  brandName        String
+  phone            String
+  phoneKey         String   @unique
+  whatsapp         String?
+  city             String
+  productType      String
+  storeUrl         String?
+  expectedProducts Int      @default(0)
+  notes            String?
+  contactMethod    String
+  dataConfirmed    Boolean  @default(false)
+  status           String   @default("PENDING")
+  rejectReason     String?
+  internalNotes    String?
+  adminId          String?
+  activationDate   DateTime?
+  campaignEndDate  DateTime?
+  firstQualifiedNotified Boolean @default(false)
+  firstBonusNotified     Boolean @default(false)
+  endWarningNotified     Boolean @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  events      SupplierReferralEvent[]
+  bonusLedger BonusLedger[]
+  products    Product[]
+
+  @@index([affiliateId])
+  @@index([status])
+  @@index([affiliateId, status])
+}
+
+/** ط³ط¬ظ„ ط¥ط¬ط±ط§ط،ط§طھ ط§ظ„ظ…ظˆط±ط¯ ط§ظ„ظ…ط±ط´ط­ (ظ…ظ† ط§ظ„ظ…ط³ظˆظ‚ ظˆط§ظ„ط£ط¯ظ…ظ†) â€” Audit Log. */
+model SupplierReferralEvent {
+  id         String   @id @default(cuid())
+  referralId String
+  referral   SupplierReferral @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  actorId    String?
+  actorRole  String   @default("SYSTEM")
+  action     String
+  fromStatus String?
+  toStatus   String?
+  note       String?
+  createdAt  DateTime @default(now())
+
+  @@index([referralId])
+  @@index([referralId, createdAt])
+}
+
+/** ط¯ظپطھط± ط¨ظˆظ†طµ ط§ظ„ظ…ظˆط±ط¯ظٹظ† â€” ط·ظ„ط¨ ظˆط§ط­ط¯ ظٹظڈظ…ظ†ط­ ط¨ظˆظ†طµ ظ…ط±ط© ظˆط§ط­ط¯ط© ظپظ‚ط· (ظ‚ظٹط¯ ظپط±ظٹط¯ referralId+orderId). */
+model BonusLedger {
+  id          String   @id @default(cuid())
+  referralId  String
+  referral    SupplierReferral @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  affiliateId String
+  affiliate   User @relation("BonusAffiliate", fields: [affiliateId], references: [id])
+  orderId     String
+  orderNumber String
+  amount      Float
+  status      String   @default("EARNED") // EARNED | PAID
+  paidAt      DateTime?
+  createdAt   DateTime @default(now())
+
+  @@unique([referralId, orderId])
+  @@index([affiliateId])
+  @@index([referralId, status])
+  @@index([orderId])
+  @@index([status])
+}
+
+/** ط¥ط¹ط¯ط§ط¯ط§طھ ط­ظ…ظ„ط© "ط£ط¶ظپ ظ…ظˆط±ط¯ظ‹ط§ ظˆط§ط±ط¨ط­" â€” ط³ط¬ظ„ ظˆط§ط­ط¯ ظٹطھط­ظƒظ… ظپظٹ ظƒظ„ ط§ظ„ط­ظ…ظ„ط©. */
+model SupplierCampaignSettings {
+  id               String    @id @default("supplier-campaign")
+  enabled          Boolean   @default(false)
+  bonusPerOrder    Float     @default(5)
+  includeCollected Boolean   @default(true)
+  campaignStart    DateTime?
+  campaignEnd      DateTime?
+  maxBonusPerSupplier Float?
+  maxTotalBonus    Float?
+  minEligibleOrders Int      @default(0)
+  durationDays     Int       @default(30)
+  durationStartFromActivation Boolean @default(true)
+  updatedBy        String?
+  updatedAt        DateTime  @updatedAt
+}
+

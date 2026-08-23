@@ -38,6 +38,8 @@ export async function POST(req: NextRequest) {
         role: "AFFILIATE",
         status: status || "ACTIVE",
       },
+      // Phase 3: never return the password hash (or other internals).
+      select: { id: true, name: true, email: true, phone: true, status: true },
     })
 
     return NextResponse.json({ success: true, user })

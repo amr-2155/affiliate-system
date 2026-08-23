@@ -1,34 +1,41 @@
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { requireAdminPermission } from "@/lib/admin-guard"
+import {
+  zonedStartOfDay,
+  zonedWeekStart,
+  zonedDateKey,
+  zonedCivilParts,
+  addDays,
+} from "@/lib/time"
 
 const EARN_STATUSES = ["DELIVERED", "SHIPPED", "CONFIRMED"]
 
-const localKey = (d: Date) => {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, "0")
-  const day = String(d.getDate()).padStart(2, "0")
-  return `${y}-${m}-${day}`
+// Cairo-time day key + label (see src/lib/time.ts — identical to prior local behavior)
+const localKey = (d: Date) => zonedDateKey(d)
+const dayLabel = (d: Date) => {
+  const p = zonedCivilParts(d)
+  return `${p.day}/${p.month}`
 }
+
+const relDay = (base: Date, delta: number) => zonedStartOfDay(addDays(base, delta))
 
 function fillDays(count: number) {
   const arr: { key: string; label: string; revenue: number; orders: number }[] = []
-  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const today = zonedStartOfDay(new Date())
   for (let i = count - 1; i >= 0; i--) {
-    const d = new Date(today); d.setDate(today.getDate() - i)
-    arr.push({ key: localKey(d), label: `${d.getDate()}/${d.getMonth() + 1}`, revenue: 0, orders: 0 })
+    const d = relDay(today, -i)
+    arr.push({ key: localKey(d), label: dayLabel(d), revenue: 0, orders: 0 })
   }
   return arr
 }
 
 function fillWeeks(count: number) {
   const arr: { key: string; label: string; revenue: number; orders: number }[] = []
-  const today = new Date(); today.setHours(0, 0, 0, 0)
-  const dow = (today.getDay() + 6) % 7
-  const monday = new Date(today); monday.setDate(today.getDate() - dow)
+  const monday = zonedWeekStart(new Date())
   for (let i = count - 1; i >= 0; i--) {
-    const m = new Date(monday); m.setDate(monday.getDate() - i * 7)
-    arr.push({ key: localKey(m), label: `${m.getDate()}/${m.getMonth() + 1}`, revenue: 0, orders: 0 })
+    const m = zonedWeekStart(relDay(monday, -7 * i))
+    arr.push({ key: localKey(m), label: dayLabel(m), revenue: 0, orders: 0 })
   }
   return arr
 }
@@ -38,15 +45,16 @@ export async function GET() {
     const guard = await requireAdminPermission("dashboard.view")
     if (guard instanceof NextResponse) return guard
 
-    const daysAgo = new Date(); daysAgo.setDate(daysAgo.getDate() - 13); daysAgo.setHours(0, 0, 0, 0)
-    const weeksAgo = new Date(); weeksAgo.setDate(weeksAgo.getDate() - 7 * 7); weeksAgo.setHours(0, 0, 0, 0)
+    const daysAgo = relDay(new Date(), -13)
+    const weeksAgo = zonedWeekStart(addDays(new Date(), -7 * 7))
 
     const [statusGroups, itemGroups, latestAffiliates, recentNotifications, dayOrders, weekOrders] = await Promise.all([
       prisma.order.groupBy({ by: ["status"], _count: { _all: true } }),
       prisma.orderItem.groupBy({
         by: ["productId"],
         _sum: { quantity: true, total: true },
-        orderBy: { _sum: { quantity: "desc" } },
+        // Deterministic tiebreak for equal quantities
+        orderBy: [{ _sum: { quantity: "desc" } }, { productId: "asc" }],
         take: 5,
       }),
       prisma.user.findMany({
@@ -74,9 +82,7 @@ export async function GET() {
     const weekly = fillWeeks(8)
     const weeklyMap = Object.fromEntries(weekly.map(w => [w.key, w]))
     for (const o of weekOrders) {
-      const d = new Date(o.createdAt); d.setHours(0, 0, 0, 0)
-      const dow = (d.getDay() + 6) % 7
-      const monday = new Date(d); monday.setDate(d.getDate() - dow)
+      const monday = zonedWeekStart(new Date(o.createdAt))
       const b = weeklyMap[localKey(monday)]
       if (b) { b.revenue += o.total; b.orders += 1 }
     }

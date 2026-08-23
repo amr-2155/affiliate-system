@@ -55,10 +55,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "المستخدم غير موجود" }, { status: 400 })
     }
 
-    const withdrawal = await prisma.$transaction(async (tx: any) => {
-      // Re-check balance inside the transaction to prevent race conditions
-      const freshUser = await tx.user.findUnique({ where: { id: session.user.id }, select: { balance: true } })
-      if (!freshUser || freshUser.balance < amount) {
+    const withdrawal = await prisma.$transaction(async (tx) => {
+      // Atomic conditional decrement — succeeds only if balance >= amount.
+      // This is app-level safety, not dependent on SQLite serialization luck,
+      // so behavior is identical after PostgreSQL migration.
+      const gate = await tx.user.updateMany({
+        where: { id: session.user.id, balance: { gte: amount } },
+        data: { balance: { decrement: amount } },
+      })
+      if (gate.count === 0) {
         throw new Error("INSUFFICIENT_BALANCE")
       }
 
@@ -71,11 +76,6 @@ export async function POST(req: NextRequest) {
           bankName,
           userId: session.user.id,
         }
-      })
-
-      await tx.user.update({
-        where: { id: session.user.id },
-        data: { balance: { decrement: amount } }
       })
 
       return w
@@ -101,8 +101,8 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json(withdrawal)
-  } catch (error: any) {
-    if (error?.message === "INSUFFICIENT_BALANCE") {
+  } catch (error) {
+    if (error instanceof Error && error.message === "INSUFFICIENT_BALANCE") {
       return NextResponse.json({ error: "الرصيد غير كافٍ" }, { status: 400 })
     }
     return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })

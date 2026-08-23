@@ -4,7 +4,14 @@ import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { computeItemCommission, computeCommission } from "@/lib/commission"
 import { isAffiliateEditable, AFFILIATE_EDITABLE_STATUSES } from "@/lib/order-state"
+import { resolveUnitPrice, parseQuantity } from "@/lib/pricing"
 import { logActivity } from "@/lib/admin-guard"
+
+class OutOfStockError extends Error {
+  constructor(public productId: string) {
+    super("OUT_OF_STOCK")
+  }
+}
 
 const ITEM_PRODUCT_SELECT = {
   id: true,
@@ -112,15 +119,23 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     const commissionInputs: { product: any; unitPrice: number; quantity: number }[] = []
 
     for (const item of items) {
-      const qty = Math.floor(Number(item.quantity))
-      if (!Number.isFinite(qty) || qty < 1) {
+      const qty = parseQuantity(item.quantity)
+      if (qty === null) {
         return NextResponse.json({ error: "الكمية غير صالحة" }, { status: 400 })
       }
       const product = await prisma.product.findUnique({ where: { id: item.productId } })
       if (!product) {
         return NextResponse.json({ error: `المنتج غير موجود: ${item.productId}` }, { status: 400 })
       }
-      const unitPrice = item.unitPrice && Number(item.unitPrice) > 0 ? Number(item.unitPrice) : product.price
+      // Phase 2: only active, visible, non-deleted products can be ordered.
+      if (product.status !== "ACTIVE" || !product.isVisible || product.deletedAt) {
+        return NextResponse.json({ error: `المنتج غير متاح للبيع: ${product.nameAr}` }, { status: 400 })
+      }
+      const price = resolveUnitPrice(product, item.unitPrice)
+      if (!price.ok) {
+        return NextResponse.json({ error: price.error }, { status: 400 })
+      }
+      const unitPrice = price.unitPrice
       const itemTotal = unitPrice * qty
       subtotal += itemTotal
       newItems.push({ productId: product.id, quantity: qty, unitPrice, total: itemTotal, note: item.note || null })
@@ -180,22 +195,47 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       return NextResponse.json({ ...detail, changes: [], commission, message: "no_changes" })
     }
 
-    await prisma.$transaction([
-      prisma.order.update({
-        where: { id },
-        data: {
-          subtotal, shippingCost, total,
-          customerName, customerPhone, customerEmail, customerAddress,
-          customerCity, customerGovernorate, notes,
-        },
-      }),
-      prisma.orderItem.deleteMany({ where: { orderId: id } }),
-      prisma.orderItem.createMany({ data: newItems.map((ni) => ({ ...ni, orderId: id })) }),
-      prisma.commissionLog.deleteMany({ where: { orderId: id } }),
-      ...(commission > 0
-        ? [prisma.commissionLog.create({ data: { amount: commission, orderId: id, userId: user.id } })]
-        : []),
-    ])
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.order.update({
+          where: { id },
+          data: {
+            subtotal, shippingCost, total,
+            customerName, customerPhone, customerEmail, customerAddress,
+            customerCity, customerGovernorate, notes,
+          },
+        })
+        // Phase 2: stock reconciliation — return all old quantities, then
+        // atomically reserve the new ones (fails whole edit if out of stock).
+        for (const oi of existing.items) {
+          await tx.product.update({
+            where: { id: oi.productId },
+            data: { stock: { increment: oi.quantity } },
+          })
+        }
+        for (const ni of newItems) {
+          const res = await tx.product.updateMany({
+            where: { id: ni.productId, stock: { gte: ni.quantity } },
+            data: { stock: { decrement: ni.quantity } },
+          })
+          if (res.count === 0) throw new OutOfStockError(ni.productId)
+        }
+        await tx.orderItem.deleteMany({ where: { orderId: id } })
+        await tx.orderItem.createMany({ data: newItems.map((ni) => ({ ...ni, orderId: id })) })
+        await tx.commissionLog.deleteMany({ where: { orderId: id } })
+        if (commission > 0) {
+          await tx.commissionLog.create({ data: { amount: commission, orderId: id, userId: user.id } })
+        }
+      })
+    } catch (e) {
+      if (e instanceof OutOfStockError) {
+        return NextResponse.json(
+          { error: "الكمية المطلوبة تتجاوز المخزون المتاح لأحد المنتجات" },
+          { status: 400 },
+        )
+      }
+      throw e
+    }
 
     await logActivity(
       user.id,

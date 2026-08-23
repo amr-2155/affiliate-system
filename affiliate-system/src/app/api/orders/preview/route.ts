@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { computeItemCommission, computeCommission } from "@/lib/commission"
+import { resolveUnitPrice } from "@/lib/pricing"
 
 export async function POST(req: NextRequest) {
   try {
@@ -26,7 +27,13 @@ export async function POST(req: NextRequest) {
       if (!Number.isFinite(qty) || qty < 1) continue
       const product = await prisma.product.findUnique({ where: { id: item.productId } })
       if (!product) continue
-      const unitPrice = item.unitPrice && Number(item.unitPrice) > 0 ? Number(item.unitPrice) : product.price
+      // C-01: same pricing policy as order creation — fixed-price products
+      // always use the DB price; custom prices must respect minPrice.
+      const price = resolveUnitPrice(product, item.unitPrice)
+      if (!price.ok) {
+        return NextResponse.json({ error: price.error }, { status: 400 })
+      }
+      const unitPrice = price.unitPrice
       subtotal += unitPrice * qty
       itemDetails.push({
         productId: product.id,

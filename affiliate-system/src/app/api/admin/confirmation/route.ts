@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { Prisma } from "@/generated/prisma/client"
 import bcrypt from "bcryptjs"
 import { requireAdminPermission, logActivity } from "@/lib/admin-guard"
+import { textMatch } from "@/lib/text-search"
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,12 +16,12 @@ export async function GET(req: NextRequest) {
     const page = Math.max(1, parseInt(searchParams.get("page") || "1"))
     const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "20")))
 
-    const where: any = { role: "VERIFIER" }
+    const where: Prisma.UserWhereInput = { role: "VERIFIER" }
     if (search) {
       where.OR = [
-        { name: { contains: search } },
-        { email: { contains: search } },
-        { phone: { contains: search } },
+        { name: textMatch(search) },
+        { email: textMatch(search) },
+        { phone: textMatch(search) },
       ]
     }
     if (status) where.status = status
@@ -45,9 +47,9 @@ export async function GET(req: NextRequest) {
       }),
     ])
 
-    const reviewCountMap = new Map(counts.map((c: any) => [c.reviewerId, c._count._all]))
+    const reviewCountMap = new Map(counts.map((c: { reviewerId: string | null; _count: { _all: number } }) => [c.reviewerId, c._count._all]))
 
-    const membersWithStats = members.map((m: any) => {
+    const membersWithStats = members.map((m: (typeof members)[number]) => {
       const assigned = reviewCountMap.get(m.id) || 0
       const confirmed = m._count.confirmedOrders
       return {
@@ -60,7 +62,7 @@ export async function GET(req: NextRequest) {
     })
 
     // آخر نشاط لكل عضو
-    const memberIds = members.map((m: any) => m.id)
+    const memberIds = members.map((m: (typeof members)[number]) => m.id)
     const lastActivities = await prisma.adminActivity.findMany({
       where: { userId: { in: memberIds } },
       orderBy: { createdAt: "desc" },

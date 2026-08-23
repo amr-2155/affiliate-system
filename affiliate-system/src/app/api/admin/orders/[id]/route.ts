@@ -2,12 +2,17 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { requireAdminPermission, requireAdminActor, actorCan, logActivity } from "@/lib/admin-guard"
 import { formatCurrency, getStatusText } from "@/lib/utils"
-import { emitEvent } from "@/lib/events"
 import { computeCommission } from "@/lib/commission"
-import { canTransitionOrder, TERMINAL_STATUSES } from "@/lib/order-state"
-import { evaluateAffiliateRewards, INCENTIVE_COUNT_STATUSES } from "@/lib/incentives"
-import { settleBonusesForOrder, revokeBonusesForOrder, BONUS_COUNT_STATUSES, BONUS_REVOKE_STATUSES, BONUS_NON_EARNING_STATUSES } from "@/lib/supplier-bonus"
+import { resolveUnitPrice, parseQuantity } from "@/lib/pricing"
+import { applyOrderTransition, validateTransition, qualifiesForIncentive, OrderStateError } from "@/lib/order-service"
+import { evaluateAffiliateRewards } from "@/lib/incentives"
 import { notify, NOTIFICATION_TYPE } from "@/lib/notifications"
+
+class OutOfStockError extends Error {
+  constructor(public productId: string) {
+    super("OUT_OF_STOCK")
+  }
+}
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -28,14 +33,6 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   } catch (error) {
     return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })
   }
-}
-
-async function getOrderCommission(orderId: string): Promise<number> {
-  const agg = await prisma.commissionLog.aggregate({
-    where: { orderId },
-    _sum: { amount: true },
-  })
-  return agg._sum.amount || 0
 }
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -59,14 +56,29 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     const existing = await prisma.order.findUnique({ where: { id } })
     if (!existing) return NextResponse.json({ error: "غير موجود" }, { status: 404 })
 
-    // منع تعديل أوامر نهائية (ملغي/مرفوض/مرتجع)
+    // منع تعديل أوامر نهائية + التحقق المبدئي من الانتقال
+    // (الفحص النهائي الذري يتم داخل applyOrderTransition)
     if (status && status !== existing.status) {
-      if ((TERMINAL_STATUSES as readonly string[]).includes(existing.status)) {
-        return NextResponse.json({ error: "لا يمكن تغيير حالة طلب نهائي" }, { status: 400 })
+      try {
+        validateTransition(existing.status, status)
+      } catch (e) {
+        if (e instanceof OrderStateError) {
+          return NextResponse.json(
+            { error: `لا يمكن الانتقال من ${getStatusText(existing.status)} إلى ${getStatusText(status)}` },
+            { status: e.httpStatus },
+          )
+        }
+        throw e
       }
-      if (!canTransitionOrder(existing.status, status)) {
-        return NextResponse.json({ error: `لا يمكن الانتقال من ${getStatusText(existing.status)} إلى ${getStatusText(status)}` }, { status: 400 })
-      }
+    }
+
+    // Phase 2: الطلب المحصّل (مدفوع) مجمّد — تعديل الأصناف يكسر الرصيد
+    // المحصّل مسبقًا، لذا يُمنع تمامًا. تعديل بيانات العميل مسموح.
+    if (items && Array.isArray(items) && items.length > 0 && existing.status === "COLLECTED") {
+      return NextResponse.json(
+        { error: "لا يمكن تعديل أصناف طلب تم تحصيل عمولته — أنشئ طلبًا جديدًا أو استخدم المرتجع" },
+        { status: 403 },
+      )
     }
 
     // لا يُسمح بتعديل subtotal/total مباشرة من العميل — هذه الحقول تُحسب تلقائيًا
@@ -84,17 +96,8 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       return String((existing as any)[k] ?? "") !== String(body[k] ?? "")
     }).map((k) => ({ field: k, label: fieldLabels[k] }))
 
+    // الحالة وتواريخها تُدار حصريًا عبر OrderService — لا تُلمس هنا.
     const data: any = {}
-    if (status) {
-      data.status = status
-      if (status === "DELIVERED") data.deliveredAt = new Date()
-      if (status === "CANCELLED") data.cancelledAt = new Date()
-      if (status === "COLLECTED") data.collectedAt = new Date()
-      if (status === "CONFIRMED" && status !== existing.status) {
-        data.confirmedById = actor.id
-        data.confirmedAt = new Date()
-      }
-    }
     if (paymentStatus) data.paymentStatus = paymentStatus
     if (trackingNumber !== undefined) data.trackingNumber = trackingNumber
     if (shippingCost !== undefined) data.shippingCost = parseFloat(shippingCost)
@@ -106,111 +109,160 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     if (customerAddress !== undefined) data.customerAddress = customerAddress
     if (customerCity !== undefined) data.customerCity = customerCity
 
-    const order = await prisma.order.update({
-      where: { id }, data,
-      include: {
-        items: { include: { product: { select: { nameAr: true, image: true } } } },
-        affiliate: { select: { name: true } },
-        comments: { include: { user: { select: { name: true, role: true } } }, orderBy: { createdAt: "desc" } },
-        images: true,
-      },
-    })
+    if (Object.keys(data).length > 0) {
+      await prisma.order.update({
+        where: { id }, data,
+        include: {
+          items: { include: { product: { select: { nameAr: true, image: true } } } },
+          affiliate: { select: { name: true } },
+          comments: { include: { user: { select: { name: true, role: true } } }, orderBy: { createdAt: "desc" } },
+          images: true,
+        },
+      })
+    }
+
+    let transition: Awaited<ReturnType<typeof applyOrderTransition>> | null = null
 
     if (items && Array.isArray(items)) {
-      for (const item of items) {
-        if (item.id && item.unitPrice !== undefined) {
-          await prisma.orderItem.update({
-            where: { id: item.id },
-            data: {
-              unitPrice: parseFloat(item.unitPrice),
-              total: parseFloat(item.unitPrice) * (item.quantity || 1),
-              quantity: item.quantity || undefined,
-              note: item.note !== undefined ? item.note : undefined,
-            },
-          })
-        }
-      }
-      const updatedItems = await prisma.orderItem.findMany({
+      // C-01: even admins cannot set arbitrary prices — the product floor
+      // (minPrice) is enforced; fixed-price products stay at their DB price.
+      // Phase 2: quantities are validated and stock is adjusted atomically.
+      const oldItems = await prisma.orderItem.findMany({
         where: { orderId: id },
-        include: { product: { select: { price: true, minPrice: true, affiliateCostPrice: true } } },
+        select: { id: true, productId: true, quantity: true },
       })
-      const newSubtotal = updatedItems.reduce((sum, i) => sum + i.total, 0)
-      const finalShipping = data.shippingCost !== undefined ? data.shippingCost : order.shippingCost
-      const finalDiscount = data.discount !== undefined ? data.discount : order.discount
-      const newTotal = newSubtotal + finalShipping - finalDiscount
-      const newCommission = computeCommission(updatedItems.map((i) => ({ product: i.product, unitPrice: i.unitPrice, quantity: i.quantity })))
+      const itemUpdates: { id: string; unitPrice: number; quantity: number; note?: string | null }[] = []
+      for (const item of items) {
+        if (!item.id || item.unitPrice === undefined) continue
+        const orderItem = await prisma.orderItem.findUnique({
+          where: { id: item.id },
+          select: { orderId: true, quantity: true, note: true, product: { select: { price: true, minPrice: true } } },
+        })
+        if (!orderItem || orderItem.orderId !== id) {
+          return NextResponse.json({ error: `عنصر الطلب غير موجود: ${item.id}` }, { status: 400 })
+        }
+        const price = resolveUnitPrice(orderItem.product, item.unitPrice)
+        if (!price.ok) {
+          return NextResponse.json({ error: price.error }, { status: 400 })
+        }
+        const qty = parseQuantity(item.quantity ?? orderItem.quantity)
+        if (qty === null) {
+          return NextResponse.json({ error: "الكمية غير صالحة" }, { status: 400 })
+        }
+        itemUpdates.push({
+          id: item.id,
+          unitPrice: price.unitPrice,
+          quantity: qty,
+          note: item.note !== undefined ? item.note : orderItem.note ?? undefined,
+        })
+      }
 
-      await prisma.$transaction([
-        prisma.order.update({ where: { id }, data: { subtotal: newSubtotal, total: newTotal } }),
-        prisma.commissionLog.deleteMany({ where: { orderId: id } }),
-        ...(newCommission > 0
-          ? [prisma.commissionLog.create({ data: { amount: newCommission, orderId: id, userId: existing.affiliateId } })]
-          : []),
-      ])
+      try {
+        await prisma.$transaction(async (tx) => {
+          for (const update of itemUpdates) {
+            await tx.orderItem.update({
+              where: { id: update.id },
+              data: {
+                unitPrice: update.unitPrice,
+                total: update.unitPrice * update.quantity,
+                quantity: update.quantity,
+                note: update.note ?? undefined,
+              },
+            })
+            // Phase 2: atomic stock adjustment for the quantity delta.
+            const old = oldItems.find((o) => o.id === update.id)
+            if (!old) continue
+            const delta = update.quantity - old.quantity
+            if (delta === 0) continue
+            if (delta < 0) {
+              await tx.product.update({
+                where: { id: old.productId },
+                data: { stock: { increment: -delta } },
+              })
+            } else {
+              const res = await tx.product.updateMany({
+                where: { id: old.productId, stock: { gte: delta } },
+                data: { stock: { decrement: delta } },
+              })
+              if (res.count === 0) throw new OutOfStockError(old.productId)
+            }
+          }
+
+          const updatedItems = await tx.orderItem.findMany({
+            where: { orderId: id },
+            include: { product: { select: { price: true, minPrice: true, affiliateCostPrice: true } } },
+          })
+          const newSubtotal = updatedItems.reduce((sum, i) => sum + i.total, 0)
+          const finalShipping = data.shippingCost !== undefined ? data.shippingCost : existing.shippingCost
+          const finalDiscount = data.discount !== undefined ? data.discount : existing.discount
+          const newTotal = newSubtotal + finalShipping - finalDiscount
+          const newCommission = computeCommission(updatedItems.map((i) => ({ product: i.product, unitPrice: i.unitPrice, quantity: i.quantity })))
+
+          await tx.order.update({ where: { id }, data: { subtotal: newSubtotal, total: newTotal } })
+          await tx.commissionLog.deleteMany({ where: { orderId: id } })
+          if (newCommission > 0) {
+            await tx.commissionLog.create({ data: { amount: newCommission, orderId: id, userId: existing.affiliateId } })
+          }
+        })
+      } catch (e) {
+        if (e instanceof OutOfStockError) {
+          return NextResponse.json(
+            { error: `الكمية المعدّلة تتجاوز المخزون المتاح للمنتج` },
+            { status: 400 },
+          )
+        }
+        throw e
+      }
 
       await logActivity(
         actor.id,
         "ORDER_ITEMS_UPDATED",
         "orders",
-        JSON.stringify({ orderId: id, subtotal: newSubtotal, commission: newCommission }),
+        JSON.stringify({ orderId: id, items: itemUpdates.map((u) => u.id) }),
         id
       )
     }
 
     if (status && status !== existing.status) {
-      // احتساب إنجازات المسوق في الحملات التحفيزية عند التسليم/التحصيل الفعلي
-      if ((INCENTIVE_COUNT_STATUSES as readonly string[]).includes(status)) {
+      // C-03/Phase 2: single atomic transition path — commission credit/revert,
+      // supplier bonuses and webhook events all flow through OrderService.
+      try {
+        transition = await applyOrderTransition({
+          orderId: id,
+          to: status,
+          source: "admin",
+          actorId: actor.id,
+          cancelReason: typeof body.reason === "string" ? body.reason : undefined,
+        })
+      } catch (e) {
+        if (e instanceof OrderStateError) {
+          return NextResponse.json({ error: e.message }, { status: e.httpStatus })
+        }
+        throw e
+      }
+
+      if (qualifiesForIncentive(status)) {
         evaluateAffiliateRewards(existing.affiliateId).catch((e) => console.error("incentive eval failed", e))
       }
-      // بونص حملة الموردين: يُحتسب عند التسليم/التحصيل فقط ويُسحب عند الخروج من هذه الحالات.
-      if ((BONUS_COUNT_STATUSES as readonly string[]).includes(status)) {
-        settleBonusesForOrder(id).catch((e) => console.error("supplier bonus settle failed", e))
-      }
-      if ((BONUS_REVOKE_STATUSES as readonly string[]).includes(status) || (BONUS_NON_EARNING_STATUSES as readonly string[]).includes(status)) {
-        revokeBonusesForOrder(id).catch((e) => console.error("supplier bonus revoke failed", e))
-      }
+
       await logActivity(
         actor.id,
         "ORDER_STATUS_CHANGED",
         "orders",
-        JSON.stringify({ orderId: id, from: existing.status, to: status }),
+        JSON.stringify({ orderId: id, from: transition.from, to: transition.to }),
         id
       )
-      const commission = await getOrderCommission(id)
-      const prevCollected = existing.status === "COLLECTED"
-      const newCollected = status === "COLLECTED"
 
-      if (newCollected && !prevCollected) {
-        // Credit the order's commission to the affiliate balance (atomic)
-        if (commission > 0) {
-          await prisma.$transaction([
-            prisma.user.update({
-              where: { id: existing.affiliateId },
-              data: { balance: { increment: commission }, totalEarnings: { increment: commission } },
-            }),
-            prisma.order.update({ where: { id }, data: { paymentStatus: "PAID" } }),
-          ])
-          notify({
-            title: "تم تحصيل العمولة",
-            message: `تم تحصيل عمولة طلب ${existing.orderNumber} بقيمة ${formatCurrency(commission)} وأصبحت متاحة للسحب`,
-            type: NOTIFICATION_TYPE.EARNINGS,
-            userId: existing.affiliateId,
-            link: "/dashboard",
-            relatedId: order.id,
-          })
-        }
-      } else if (!newCollected && prevCollected && commission > 0) {
-        // Revert the credited commission if order leaves the collected state (atomic)
-        await prisma.user.update({
-          where: { id: existing.affiliateId },
-          data: {
-            balance: { decrement: commission },
-            totalEarnings: { decrement: commission },
-          },
+      if (transition.commissionCredited > 0) {
+        notify({
+          title: "تم تحصيل العمولة",
+          message: `تم تحصيل عمولة طلب ${existing.orderNumber} بقيمة ${formatCurrency(transition.commissionCredited)} وأصبحت متاحة للسحب`,
+          type: NOTIFICATION_TYPE.EARNINGS,
+          userId: existing.affiliateId,
+          link: "/dashboard",
+          relatedId: existing.id,
         })
-      }
-
-      if (!(newCollected && !prevCollected)) {
+      } else {
         notify({
           title: "تم تحديث حالة الطلب",
           message: `تم تحديث حالة طلب ${existing.orderNumber} إلى ${getStatusText(status)}`,
@@ -219,30 +271,6 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
           link: `/orders/${existing.id}`,
           relatedId: existing.id,
         })
-      }
-
-      // Emit webhook event for status change
-      const eventMap: Record<string, string> = {
-        CONFIRMED: "order.confirmed",
-        REJECTED: "order.rejected",
-        PROCESSING: "order.processing",
-        SHIPPED: "order.shipped",
-        DELIVERED: "order.delivered",
-        COLLECTED: "order.collected",
-        CANCELLED: "order.cancelled",
-      }
-      const eventName = eventMap[status]
-      if (eventName) {
-        await emitEvent(eventName, {
-          orderNumber: existing.orderNumber,
-          status,
-          customerName: order.customerName,
-          customerPhone: order.customerPhone,
-          customerCity: order.customerCity,
-          total: order.total,
-          currency: order.currency,
-          trackingNumber: order.trackingNumber || null,
-        }, existing.id)
       }
     }
 
@@ -279,10 +307,21 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     const { id } = await params
     const order = await prisma.order.findUnique({ where: { id }, select: { id: true, status: true } })
     if (!order) return NextResponse.json({ error: "غير موجود" }, { status: 404 })
-    if ((TERMINAL_STATUSES as readonly string[]).includes(order.status)) {
-      return NextResponse.json({ error: "لا يمكن حذف طلب نهائي" }, { status: 400 })
+    try {
+      // Through OrderService so bonuses/webhooks stay consistent with a normal cancel.
+      await applyOrderTransition({
+        orderId: id,
+        to: "CANCELLED",
+        source: "admin",
+        actorId: guard.actor.id,
+        cancelReason: "حذف من الإدارة",
+      })
+    } catch (e) {
+      if (e instanceof OrderStateError) {
+        return NextResponse.json({ error: e.message }, { status: e.httpStatus })
+      }
+      throw e
     }
-    await prisma.order.update({ where: { id }, data: { status: "CANCELLED", cancelledAt: new Date(), cancelReason: "حذف من الإدارة" } })
     return NextResponse.json({ success: true })
   } catch (error) {
     return NextResponse.json({ error: "خطأ في الخادم" }, { status: 500 })

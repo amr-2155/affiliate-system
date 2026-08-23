@@ -40,17 +40,28 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ rewa
       if (reward.status === "PAID") {
         return NextResponse.json({ error: "تم صرف هذه المكافأة مسبقًا" }, { status: 400 })
       }
-      // الصرف: تحديث الحالة + إضافة الرصيد في معاملة واحدة (يمنع الصرف المزدوج)
-      await prisma.$transaction([
-        prisma.incentiveReward.update({
-          where: { id: rewardId },
-          data: { status: "PAID", paidAt: new Date(), processedById: guard.actor.id, processedAt: new Date() },
-        }),
-        prisma.user.update({
-          where: { id: reward.affiliateId },
-          data: { balance: { increment: reward.amount }, totalEarnings: { increment: reward.amount } },
-        }),
-      ])
+
+      try {
+        await prisma.$transaction(async (tx) => {
+          const gate = await tx.incentiveReward.updateMany({
+            where: { id: rewardId, status: { not: "PAID" } },
+            data: { status: "PAID", paidAt: new Date(), processedById: guard.actor.id, processedAt: new Date() },
+          })
+          if (gate.count === 0) {
+            throw new Error("ALREADY_PAID")
+          }
+          await tx.user.update({
+            where: { id: reward.affiliateId },
+            data: { balance: { increment: reward.amount }, totalEarnings: { increment: reward.amount } },
+          })
+        })
+      } catch (e) {
+        if (e instanceof Error && e.message === "ALREADY_PAID") {
+          return NextResponse.json({ error: "تم صرف هذه المكافأة مسبقًا" }, { status: 400 })
+        }
+        throw e
+      }
+
       notify({
         title: "💰 تم صرف مكافأتك",
         message: `تم إضافة مكافأة حملة "${reward.campaign.name}" بقيمة ${formatCurrency(reward.amount)} إلى رصيدك وأصبحت متاحة للسحب.`,

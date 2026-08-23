@@ -3,6 +3,7 @@ import { getSetting } from "@/lib/settings"
 import { logActivity } from "@/lib/admin-guard"
 import { emitEvent } from "@/lib/events"
 import { notify, NOTIFICATION_TYPE } from "@/lib/notifications"
+import { applyOrderTransition, OrderStateError } from "@/lib/order-service"
 
 export const CONFIRMATION_SETTINGS = {
   "orders-auto-cancel-enabled": "true",
@@ -73,7 +74,7 @@ export async function autoCancelOrders(now = new Date(), dryRun = false): Promis
 
   let cancelled = 0
   let skipped = 0
-  let errors = 0
+  const errors = 0
   const details: string[] = []
 
   for (const order of candidates) {
@@ -101,44 +102,48 @@ export async function autoCancelOrders(now = new Date(), dryRun = false): Promis
       continue
     }
 
-    // تحويل ذرّي آمن — لا يُنفَّذ إلا إذا كان الطلب ما زال PENDING/PROCESSING
-    const result = await prisma.order.updateMany({
-      where: { id: order.id, status: { in: ["PENDING", "PROCESSING"] }, confirmedAt: null },
-      data: {
-        status: "CANCELLED",
-        cancelledAt: now,
+    // تحويل ذرّي آمن عبر OrderService — نفس مسار بقية التطبيق:
+    // قفل الحالة، إرجاع المخزون، سحب البونص، وبث الحدث القياسي order.cancelled.
+    try {
+      await applyOrderTransition({
+        orderId: order.id,
+        to: "CANCELLED",
+        source: "auto-cancel",
         cancelReason: "انتهاء مهلة التأكيد",
-      },
+      })
+    } catch (e) {
+      if (e instanceof OrderStateError) {
+        skipped++; details.push(`${order.orderNumber}: ${e.message} — تخطي`)
+        continue
+      }
+      throw e
+    }
+
+    cancelled++
+    details.push(`${order.orderNumber}: تم الإلغاء التلقائي`)
+
+    // Audit Log (بمعرف النظام — بلا مستخدم فعلي)
+    await logActivity(order.affiliateId, "ORDER_AUTO_CANCELLED", "orders", `إلغاء تلقائي للطلب ${order.orderNumber} — انتهاء مهلة التأكيد`, order.id)
+
+    // Notification للمسوق (بشكل idempotent)
+    notify({
+      title: "إلغاء تلقائي للطلب",
+      message: `تم إلغاء الطلب ${order.orderNumber} تلقائيًا لانتهاء مهلة التأكيد`,
+      type: NOTIFICATION_TYPE.ORDER,
+      userId: order.affiliateId,
+      link: `/orders/${order.id}`,
+      relatedId: order.id,
     })
 
-    if (result.count === 1) {
-      cancelled++
-      details.push(`${order.orderNumber}: تم الإلغاء التلقائي`)
-
-      // Audit Log (بمعرف النظام — بلا مستخدم فعلي)
-      await logActivity(order.affiliateId, "ORDER_AUTO_CANCELLED", "orders", `إلغاء تلقائي للطلب ${order.orderNumber} — انتهاء مهلة التأكيد`, order.id)
-
-      // Notification للمسوق (بشكل idempotent)
-      notify({
-        title: "إلغاء تلقائي للطلب",
-        message: `تم إلغاء الطلب ${order.orderNumber} تلقائياً لانتهاء مهلة التأكيد`,
-        type: NOTIFICATION_TYPE.ORDER,
-        userId: order.affiliateId,
-        link: `/orders/${order.id}`,
-        relatedId: order.id,
-      })
-
-      // حدث order.auto_cancelled — idempotency يضمن عدم تكرار الإرسال
-      await emitEvent("order.auto_cancelled", {
-        orderNumber: order.orderNumber,
-        status: "CANCELLED",
-        reason: "انتهاء مهلة التأكيد",
-        customerName: order.customerName,
-        total: order.total,
-      }, order.id)
-    } else {
-      skipped++; details.push(`${order.orderNumber}: سبق تأكيده أو تغيّرت حالته — تخطي`)
-    }
+    // حدث order.auto_cancelled يُباع كما هو للتوافق مع المستمعين الحاليين
+    // (الخدمة بثت بالفعل order.cancelled القياسي).
+    await emitEvent("order.auto_cancelled", {
+      orderNumber: order.orderNumber,
+      status: "CANCELLED",
+      reason: "انتهاء مهلة التأكيد",
+      customerName: order.customerName,
+      total: order.total,
+    }, order.id)
   }
 
   return { scanned: candidates.length, cancelled, skipped, errors, details }

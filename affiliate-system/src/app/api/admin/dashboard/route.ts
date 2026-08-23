@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { requireAdminPermission } from "@/lib/admin-guard"
+import { zonedStartOfDay, zonedStartOfMonth, zonedStartOfYear } from "@/lib/time"
 
 export async function GET() {
   try {
@@ -8,9 +9,10 @@ export async function GET() {
     if (guard instanceof NextResponse) return guard
 
     const now = new Date()
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-    const yearStart = new Date(now.getFullYear(), 0, 1)
+    // Cairo-time boundaries (see src/lib/time.ts — identical to prior local-time behavior)
+    const todayStart = zonedStartOfDay(now)
+    const monthStart = zonedStartOfMonth(now)
+    const yearStart = zonedStartOfYear(now)
 
     const [
       totalAffiliates,

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
+import { zonedStartOfDay, zonedStartOfMonth, zonedStartOfYear } from "@/lib/time"
 
 export async function GET() {
   try {
@@ -12,9 +13,10 @@ export async function GET() {
 
     const userId = session.user.id
     const now = new Date()
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-    const yearStart = new Date(now.getFullYear(), 0, 1)
+    // Cairo-time boundaries (see src/lib/time.ts — identical to prior local-time behavior)
+    const todayStart = zonedStartOfDay(now)
+    const monthStart = zonedStartOfMonth(now)
+    const yearStart = zonedStartOfYear(now)
 
     const [
       todayOrders,
@@ -63,7 +65,8 @@ export async function GET() {
         by: ["productId"],
         where: { order: { affiliateId: userId } },
         _sum: { quantity: true, total: true },
-        orderBy: { _sum: { total: "desc" } },
+        // Deterministic tiebreak for equal totals (stable across DB engines)
+        orderBy: [{ _sum: { total: "desc" } }, { productId: "asc" }],
         take: 5,
       }),
       prisma.order.findMany({
@@ -95,12 +98,12 @@ export async function GET() {
     ])
 
     // Enrich top products with product details (single query instead of N+1)
-    const productIds = topProducts.map((tp: any) => tp.productId)
+    const productIds = topProducts.map((tp: { productId: string }) => tp.productId)
     const products = productIds.length > 0
       ? await prisma.product.findMany({ where: { id: { in: productIds } } })
       : []
     const productMap = new Map(products.map(p => [p.id, p]))
-    const enrichedTopProducts = topProducts.map((tp: any) => ({
+    const enrichedTopProducts = topProducts.map((tp: { productId: string }) => ({
       ...tp,
       product: productMap.get(tp.productId) || null,
     }))

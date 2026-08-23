@@ -3,11 +3,7 @@ import crypto from "crypto"
 import { prisma } from "@/lib/prisma"
 import { getSetting } from "@/lib/settings"
 import { logActivity } from "@/lib/admin-guard"
-import { formatCurrency } from "@/lib/utils"
-import { emitEvent } from "@/lib/events"
-import { notify, NOTIFICATION_TYPE } from "@/lib/notifications"
-import { canTransitionOrder, TERMINAL_STATUSES } from "@/lib/order-state"
-import { settleBonusesForOrder, revokeBonusesForOrder, BONUS_COUNT_STATUSES, BONUS_REVOKE_STATUSES, BONUS_NON_EARNING_STATUSES } from "@/lib/supplier-bonus"
+import { applyOrderTransition, OrderStateError } from "@/lib/order-service"
 
 /**
  * نقطة وصول خارجية (n8n / خدمة خارجية) لتحديث حالة الطلب.
@@ -24,12 +20,34 @@ export async function POST(req: NextRequest) {
     const secret = await getSetting("integrations-n8n-api-key", "")
     const rawBody = await req.text()
 
+    // Phase 3: replay protection.
+    // Senders MAY include `X-Timestamp` (epoch ms); it is then signed as
+    // `${rawBody}:${timestamp}` and must be within ±5 minutes.
+    // Setting `integrations-n8n-require-timestamp=true` makes it mandatory
+    // (flip after updating the n8n workflow to send it).
+    const REPLAY_WINDOW_MS = 5 * 60 * 1000
+    const requireTimestamp = (await getSetting("integrations-n8n-require-timestamp", "false")) === "true"
+    const timestampHeader = req.headers.get("x-timestamp") || ""
+
+    if (requireTimestamp && !timestampHeader) {
+      return NextResponse.json({ error: "X-Timestamp مطلوب" }, { status: 401 })
+    }
+
+    let payloadToSign = rawBody
+    if (timestampHeader) {
+      const ts = Number(timestampHeader)
+      if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > REPLAY_WINDOW_MS) {
+        return NextResponse.json({ error: "طابع زمني غير صالح أو منتهي الصلاحية" }, { status: 401 })
+      }
+      payloadToSign = `${rawBody}:${timestampHeader}`
+    }
+
     const signature = req.headers.get("x-signature") || ""
     if (!secret || !signature) {
       return NextResponse.json({ error: "التوقيع مطلوب" }, { status: 401 })
     }
 
-    const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex")
+    const expected = crypto.createHmac("sha256", secret).update(payloadToSign).digest("hex")
     const a = Buffer.from(expected)
     const b = Buffer.from(signature.replace(/^sha256=/, ""))
     const valid = a.length === b.length && crypto.timingSafeEqual(a, b)
@@ -47,83 +65,36 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "الطلب غير موجود" }, { status: 404 })
     }
 
-    const VALID_STATUSES = ["CONFIRMED", "REJECTED", "PROCESSING", "SHIPPED", "DELIVERED", "COLLECTED", "CANCELLED"]
-    const data: any = {}
-    if (status && VALID_STATUSES.includes(status)) {
-      // منع تحديث أوامر نهائية
-      if ((TERMINAL_STATUSES as readonly string[]).includes(order.status)) {
-        return NextResponse.json({ error: "الطلب في حالة نهائية ولا يمكن تحديثه" }, { status: 400 })
-      }
-      // التحقق من صلاحية الانتقال
-      if (!canTransitionOrder(order.status, status)) {
-        return NextResponse.json({ error: `لا يمكن الانتقال من ${order.status} إلى ${status}` }, { status: 400 })
-      }
-      data.status = status
-      if (status === "DELIVERED") data.deliveredAt = new Date()
-      if (status === "COLLECTED") data.collectedAt = new Date()
-      if (status === "CANCELLED") { data.cancelledAt = new Date(); data.cancelReason = body.reason || "إلغاء عبر تكامل خارجي" }
-      if (status === "CONFIRMED" && !order.confirmedAt) { data.confirmedAt = new Date(); data.confirmedById = null }
-    }
-    if (trackingNumber !== undefined) data.trackingNumber = String(trackingNumber)
-
-    if (Object.keys(data).length === 0) {
-      return NextResponse.json({ error: "لا توجد تغييرات صالحة" }, { status: 400 })
+    // Non-status fields (e.g. tracking number) update directly.
+    if (trackingNumber !== undefined && trackingNumber !== order.trackingNumber) {
+      await prisma.order.update({ where: { id: order.id }, data: { trackingNumber: String(trackingNumber) } })
     }
 
-    const updated = await prisma.order.update({ where: { id: order.id }, data })
-
-    // Handle commission credit/reversal on COLLECTED transition
     if (status) {
-      const prevCollected = order.status === "COLLECTED"
-      const newCollected = status === "COLLECTED"
-
-      if ((newCollected && !prevCollected) || (!newCollected && prevCollected)) {
-        const agg = await prisma.commissionLog.aggregate({ where: { orderId: order.id }, _sum: { amount: true } })
-        const commission = agg._sum.amount || 0
-        if (commission > 0) {
-          if (newCollected && !prevCollected) {
-            await prisma.user.update({
-              where: { id: order.affiliateId },
-              data: { balance: { increment: commission }, totalEarnings: { increment: commission } },
-            })
-          } else if (!newCollected && prevCollected) {
-            await prisma.user.update({
-              where: { id: order.affiliateId },
-              data: { balance: { decrement: commission }, totalEarnings: { decrement: commission } },
-            })
-          }
+      // C-03/Phase 2: single atomic transition path — validation, commission
+      // credit/revert, supplier bonuses and webhook events all live in
+      // OrderService now.
+      try {
+        await applyOrderTransition({
+          orderId: order.id,
+          to: String(status),
+          source: "external",
+          cancelReason: typeof body.reason === "string" ? body.reason : "إلغاء عبر تكامل خارجي",
+        })
+      } catch (e) {
+        if (e instanceof OrderStateError) {
+          return NextResponse.json({ error: e.message }, { status: e.httpStatus })
         }
-      }
-
-      // Emit webhook event
-      const eventMap: Record<string, string> = {
-        CONFIRMED: "order.confirmed", REJECTED: "order.rejected",
-        PROCESSING: "order.processing", SHIPPED: "order.shipped",
-        DELIVERED: "order.delivered", COLLECTED: "order.collected",
-        CANCELLED: "order.cancelled",
-      }
-      if (eventMap[status]) {
-        await emitEvent(eventMap[status], {
-          orderNumber: order.orderNumber, status,
-          total: updated.total, currency: updated.currency,
-        }, order.id).catch(() => {})
+        throw e
       }
     }
 
-    // بونص حملة الموردين — نفس منطق بقية نقاط تحديث الحالة (آمن ضد التكرار).
-    if (status && (BONUS_COUNT_STATUSES as readonly string[]).includes(status)) {
-      settleBonusesForOrder(order.id).catch((e) => console.error("supplier bonus settle failed", e))
-    }
-    if (status && ((BONUS_REVOKE_STATUSES as readonly string[]).includes(status) || (BONUS_NON_EARNING_STATUSES as readonly string[]).includes(status))) {
-      revokeBonusesForOrder(order.id).catch((e) => console.error("supplier bonus revoke failed", e))
-    }
-
-    await logActivity(order.affiliateId, "ORDER_EXTERNAL_UPDATE", "orders", `تحديث خارجي (n8n) للطلب ${order.orderNumber} → ${data.status || "بيانات"}`,)
+    await logActivity(order.affiliateId, "ORDER_EXTERNAL_UPDATE", "orders", `تحديث خارجي (n8n) للطلب ${order.orderNumber} → ${status || "بيانات"}`)
       .catch(() => {})
 
-    return NextResponse.json({ ok: true, orderNumber: updated.orderNumber, status: updated.status })
-  } catch (error: any) {
-    if (error?.name === "SyntaxError") {
+    return NextResponse.json({ ok: true, orderNumber: order.orderNumber, status: status || order.status })
+  } catch (error) {
+    if (error instanceof SyntaxError) {
       return NextResponse.json({ error: "JSON غير صالح" }, { status: 400 })
     }
     console.error("inbound webhook error", error)

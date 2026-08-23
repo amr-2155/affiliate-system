@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { Prisma } from "@/generated/prisma/client"
 import { requireAdminPermission } from "@/lib/admin-guard"
 import { SUPPLIER_STATUS, SUPPLIER_STATUS_META } from "@/lib/supplier-referrals"
 import { getCampaignSettings, getQualifyingOrders, referralIsExpired } from "@/lib/supplier-bonus"
@@ -16,7 +17,7 @@ export async function GET(req: NextRequest) {
     const settings = await getCampaignSettings()
 
     // قائمة الموردين المرشحين مع ملخص الحالة والإجمالي.
-    const where: any = {}
+    const where: Prisma.SupplierReferralWhereInput = {}
     if (status !== "ALL") where.status = status
 
     const referrals = await prisma.supplierReferral.findMany({
@@ -83,7 +84,8 @@ export async function GET(req: NextRequest) {
       const topAffiliates = await prisma.supplierReferral.groupBy({
         by: ["affiliateId"],
         _count: true,
-        orderBy: { _count: { affiliateId: "desc" } },
+        // Deterministic tiebreak for equal referral counts
+        orderBy: [{ _count: { affiliateId: "desc" } }, { affiliateId: "asc" }],
         take: 5,
       })
       const affiliateNames = await prisma.user.findMany({

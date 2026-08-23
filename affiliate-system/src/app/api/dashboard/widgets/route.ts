@@ -2,15 +2,20 @@ import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
+import {
+  zonedStartOfDay,
+  zonedWeekStart,
+  zonedStartOfRelativeMonth,
+  zonedMonthKeyOffset,
+  addDays,
+} from "@/lib/time"
 
-const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate())
+const startOfDay = (d: Date) => zonedStartOfDay(d)
 
-const startOfWeek = (d: Date) => {
-  const x = startOfDay(d)
-  const dow = (x.getDay() + 6) % 7
-  x.setDate(x.getDate() - dow)
-  return x
-}
+const startOfWeek = (d: Date) => zonedWeekStart(d)
+
+// Exact Cairo-midnight boundary N days from a boundary instant (DST-safe)
+const relDay = (base: Date, delta: number) => zonedStartOfDay(addDays(base, delta))
 
 export async function GET() {
   try {
@@ -22,13 +27,13 @@ export async function GET() {
     const userId = session.user.id
     const now = new Date()
     const todayStart = startOfDay(now)
-    const tomorrowStart = new Date(todayStart); tomorrowStart.setDate(todayStart.getDate() + 1)
-    const yesterdayStart = new Date(todayStart); yesterdayStart.setDate(todayStart.getDate() - 1)
+    const yesterdayStart = relDay(todayStart, -1)
     const weekStart = startOfWeek(now)
-    const lastWeekStart = new Date(weekStart); lastWeekStart.setDate(weekStart.getDate() - 7)
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-    const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1)
+    const lastWeekStart = zonedWeekStart(addDays(weekStart, -7))
+    // Cairo-time month boundaries (see src/lib/time.ts — identical to prior local-time behavior)
+    const monthStart = zonedStartOfRelativeMonth(now, 0)
+    const lastMonthStart = zonedStartOfRelativeMonth(now, -1)
+    const twelveMonthsAgo = zonedStartOfRelativeMonth(now, -11)
 
     const commissionSum = (gte: Date, lt?: Date) => prisma.commissionLog.aggregate({
       where: { userId, createdAt: lt ? { gte, lt } : { gte } },
@@ -68,8 +73,7 @@ export async function GET() {
 
     const months: { month: string; commission: number }[] = []
     for (let i = 11; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
-      months.push({ month: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`, commission: 0 })
+      months.push({ month: zonedMonthKeyOffset(now, -i), commission: 0 })
     }
     const monthMap = Object.fromEntries(months.map((m) => [m.month, m]))
     for (const l of logs) {
@@ -95,7 +99,7 @@ export async function GET() {
         monthOrders: monthO,
         lastMonthOrders: lastMonthO,
       },
-      ordersByStatus: statusGroups.map((g: any) => ({ status: g.status, count: g._count._all })),
+      ordersByStatus: statusGroups.map((g: { status: string | null; _count: { _all: number } }) => ({ status: g.status, count: g._count._all })),
       commissionMonthly: months,
       recentNotifications,
     })
