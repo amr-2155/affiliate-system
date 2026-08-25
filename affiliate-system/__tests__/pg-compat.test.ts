@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert/strict"
-import { execSync } from "child_process"
 import { join } from "path"
+import { setupTestDatabase } from "./setup-db"
 import type { PrismaClient } from "../src/generated/prisma/client"
 import type * as Incentives from "../src/lib/incentives"
 
@@ -154,14 +154,9 @@ describe("time.ts Africa/Cairo boundaries (explicit TZ contract)", () => {
 
 describe("PG-compat DB behaviors", () => {
   before(async () => {
-    execSync("npx prisma db push --schema=prisma/schema.prisma --skip-generate", {
-      cwd: join(__dirname, ".."),
-      env: { ...process.env, DATABASE_URL: "file:" + DB_PATH },
-      stdio: "pipe",
-    })
-    process.env.DATABASE_URL = "file:" + DB_PATH
+    process.env.DATABASE_URL = await setupTestDatabase("test-pgcompat.db")
     const p = await import("../src/generated/prisma/client")
-    prisma = new p.PrismaClient({ datasources: { db: { url: "file:" + DB_PATH } } })
+    prisma = new p.PrismaClient()
     const inc = await import("../src/lib/incentives")
     claimMilestone = inc.claimMilestone
   })
@@ -201,6 +196,26 @@ describe("PG-compat DB behaviors", () => {
     assert.deepEqual(JSON.parse(target2!.milestonesNotified || "[]").sort(), ["100", "90"])
   })
 
+  // Engine-scope: 8 concurrent interactive writers exceed SQLite's whole-DB
+  // lock; this invariant is validated on PostgreSQL (Phase 16 staging results).
+  const onSqlite = !(process.env.TEST_DATABASE_URL ?? "").startsWith("postgres")
+  it("order counter: concurrent generations produce unique sequential values", { skip: onSqlite ? "requires PostgreSQL concurrent-writer capability" : false }, async () => {
+    const N = 8
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        prisma.$transaction(async (tx) => {
+          const c = await tx.orderCounter.upsert({
+            where: { id: "main" },
+            create: { id: "main", value: 1 },
+            update: { value: { increment: 1 } },
+          })
+          return c.value as number
+        }),
+      ),
+    )
+    assert.equal(new Set(results).size, N, `all ${N} counter values must be unique under concurrency`)
+    for (const v of results) assert.ok(v > 0 && Number.isInteger(v), "counter value is a positive integer")
+  })
   it("groupBy aggregate tiebreak: equal sums ordered deterministically by key", async () => {
     const mkProduct = async (name: string) => {
       const cat = await prisma.category.create({ data: { name: "Cat-" + uid(), nameAr: name, slug: uid() } })

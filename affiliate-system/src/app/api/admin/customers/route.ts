@@ -32,55 +32,55 @@ export async function GET(req: NextRequest) {
     const searchFilter =
       search === ""
         ? Prisma.empty
-        : Prisma.sql` AND (LOWER(customerPhone) LIKE LOWER(${like}) OR LOWER(customerName) LIKE LOWER(${like}))`
+        : Prisma.sql` AND (LOWER("customerPhone") LIKE LOWER(${like}) OR LOWER("customerName") LIKE LOWER(${like}))`
 
     const newCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
     let segmentWhere = Prisma.empty
-    if (segment === "NEW") segmentWhere = Prisma.sql` AND firstOrderAt >= ${newCutoff}`
-    else if (segment === "DELIVERED") segmentWhere = Prisma.sql` AND deliveredCnt > 0`
-    else if (segment === "CANCELLED") segmentWhere = Prisma.sql` AND cancelledCnt > 0`
-    else if (segment === "PENDING") segmentWhere = Prisma.sql` AND pendingCnt > 0`
+    if (segment === "NEW") segmentWhere = Prisma.sql` AND "firstOrderAt" >= ${newCutoff}`
+    else if (segment === "DELIVERED") segmentWhere = Prisma.sql` AND "deliveredCnt" > 0`
+    else if (segment === "CANCELLED") segmentWhere = Prisma.sql` AND "cancelledCnt" > 0`
+    else if (segment === "PENDING") segmentWhere = Prisma.sql` AND "pendingCnt" > 0`
 
     const orderBySql =
       sort === "name" ? Prisma.sql`ORDER BY name ASC` :
       sort === "name_desc" ? Prisma.sql`ORDER BY name DESC` :
-      sort === "orders" ? Prisma.sql`ORDER BY orderCount DESC` :
-      sort === "orders_asc" ? Prisma.sql`ORDER BY orderCount ASC` :
-      sort === "value" ? Prisma.sql`ORDER BY totalValue DESC` :
-      sort === "value_asc" ? Prisma.sql`ORDER BY totalValue ASC` :
-      Prisma.sql`ORDER BY lastOrderAt DESC`
+      sort === "orders" ? Prisma.sql`ORDER BY "orderCount" DESC` :
+      sort === "orders_asc" ? Prisma.sql`ORDER BY "orderCount" ASC` :
+      sort === "value" ? Prisma.sql`ORDER BY "totalValue" DESC` :
+      sort === "value_asc" ? Prisma.sql`ORDER BY "totalValue" ASC` :
+      Prisma.sql`ORDER BY "lastOrderAt" DESC`
 
     const offset = (page - 1) * limit
     // Deterministic tiebreaker for equal sort keys (stable pagination across pages).
     const orderByFinal = Prisma.sql`${orderBySql}, phone ASC`
 
     const windowCols = Prisma.sql`
-      customerPhone AS phone,
-      customerName AS name,
-      customerEmail AS email,
-      customerCity AS city,
-      customerGovernorate AS governorate,
-      COUNT(*) OVER (PARTITION BY customerPhone) AS orderCount,
-      SUM(total) OVER (PARTITION BY customerPhone) AS totalValue,
-      MIN(createdAt) OVER (PARTITION BY customerPhone) AS firstOrderAt,
-      MAX(createdAt) OVER (PARTITION BY customerPhone) AS lastOrderAt,
-      SUM(CASE WHEN status IN ('DELIVERED','COLLECTED') THEN 1 ELSE 0 END) OVER (PARTITION BY customerPhone) AS deliveredCnt,
-      SUM(CASE WHEN status IN ('CANCELLED','RETURNED') THEN 1 ELSE 0 END) OVER (PARTITION BY customerPhone) AS cancelledCnt,
-      SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) OVER (PARTITION BY customerPhone) AS pendingCnt,
-      ROW_NUMBER() OVER (PARTITION BY customerPhone ORDER BY createdAt DESC) AS rn`
+      "customerPhone" AS phone,
+      "customerName" AS name,
+      "customerEmail" AS email,
+      "customerCity" AS city,
+      "customerGovernorate" AS governorate,
+      COUNT(*) OVER (PARTITION BY "customerPhone") AS "orderCount",
+      SUM(total) OVER (PARTITION BY "customerPhone") AS "totalValue",
+      MIN("createdAt") OVER (PARTITION BY "customerPhone") AS "firstOrderAt",
+      MAX("createdAt") OVER (PARTITION BY "customerPhone") AS "lastOrderAt",
+      SUM(CASE WHEN status IN ('DELIVERED','COLLECTED') THEN 1 ELSE 0 END) OVER (PARTITION BY "customerPhone") AS "deliveredCnt",
+      SUM(CASE WHEN status IN ('CANCELLED','RETURNED') THEN 1 ELSE 0 END) OVER (PARTITION BY "customerPhone") AS "cancelledCnt",
+      SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) OVER (PARTITION BY "customerPhone") AS "pendingCnt",
+      ROW_NUMBER() OVER (PARTITION BY "customerPhone" ORDER BY "createdAt" DESC) AS rn`
 
     const listSql = Prisma.sql`
-      SELECT phone, name, email, city, governorate, orderCount, totalValue, firstOrderAt, lastOrderAt
+      SELECT phone, name, email, city, governorate, "orderCount", "totalValue", "firstOrderAt", "lastOrderAt"
       FROM (SELECT ${windowCols} FROM "Order" WHERE 1=1${searchFilter}) WHERE rn = 1${segmentWhere}
       ${orderByFinal}
       LIMIT ${limit} OFFSET ${offset}`
 
     const countWindowCols = Prisma.sql`
-      MIN(createdAt) OVER (PARTITION BY customerPhone) AS firstOrderAt,
-      SUM(CASE WHEN status IN ('DELIVERED','COLLECTED') THEN 1 ELSE 0 END) OVER (PARTITION BY customerPhone) AS deliveredCnt,
-      SUM(CASE WHEN status IN ('CANCELLED','RETURNED') THEN 1 ELSE 0 END) OVER (PARTITION BY customerPhone) AS cancelledCnt,
-      SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) OVER (PARTITION BY customerPhone) AS pendingCnt,
-      ROW_NUMBER() OVER (PARTITION BY customerPhone ORDER BY createdAt DESC) AS rn`
+      MIN("createdAt") OVER (PARTITION BY "customerPhone") AS "firstOrderAt",
+      SUM(CASE WHEN status IN ('DELIVERED','COLLECTED') THEN 1 ELSE 0 END) OVER (PARTITION BY "customerPhone") AS "deliveredCnt",
+      SUM(CASE WHEN status IN ('CANCELLED','RETURNED') THEN 1 ELSE 0 END) OVER (PARTITION BY "customerPhone") AS "cancelledCnt",
+      SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) OVER (PARTITION BY "customerPhone") AS "pendingCnt",
+      ROW_NUMBER() OVER (PARTITION BY "customerPhone" ORDER BY "createdAt" DESC) AS rn`
 
     const countSql = Prisma.sql`
       SELECT COUNT(*) AS total
@@ -92,15 +92,15 @@ export async function GET(req: NextRequest) {
     const [list, totalRows, breakdown, affiliateMap, segmentsRow] = await Promise.all([
       prisma.$queryRaw<Record<string, unknown>[]>(listSql),
       prisma.$queryRaw<{ total: unknown }[]>(countSql),
-      prisma.$queryRaw<{ phone: string; status: string; cnt: unknown }[]>`SELECT customerPhone AS phone, status, COUNT(*) AS cnt FROM "Order" GROUP BY customerPhone, status`,
-      prisma.$queryRaw<{ phone: string; affiliateId: string; cnt: unknown }[]>`SELECT customerPhone AS phone, affiliateId, COUNT(*) AS cnt FROM "Order" GROUP BY customerPhone, affiliateId`,
+      prisma.$queryRaw<{ phone: string; status: string; cnt: unknown }[]>`SELECT "customerPhone" AS phone, status, COUNT(*) AS cnt FROM "Order" GROUP BY "customerPhone", status`,
+      prisma.$queryRaw<{ phone: string; affiliateId: string; cnt: unknown }[]>`SELECT "customerPhone" AS phone, "affiliateId", COUNT(*) AS cnt FROM "Order" GROUP BY "customerPhone", "affiliateId"`,
       prisma.$queryRaw<Record<string, unknown>[]>`
         SELECT
-          COUNT(*) AS allCnt,
-          SUM(CASE WHEN firstOrderAt >= ${newCutoff} THEN 1 ELSE 0 END) AS newCnt,
-          SUM(CASE WHEN deliveredCnt > 0 THEN 1 ELSE 0 END) AS deliveredCnt,
-          SUM(CASE WHEN cancelledCnt > 0 THEN 1 ELSE 0 END) AS cancelledCnt,
-          SUM(CASE WHEN pendingCnt > 0 THEN 1 ELSE 0 END) AS pendingCnt
+          COUNT(*) AS "allCnt",
+          SUM(CASE WHEN "firstOrderAt" >= ${newCutoff} THEN 1 ELSE 0 END) AS "newCnt",
+          SUM(CASE WHEN "deliveredCnt" > 0 THEN 1 ELSE 0 END) AS "deliveredCnt",
+          SUM(CASE WHEN "cancelledCnt" > 0 THEN 1 ELSE 0 END) AS "cancelledCnt",
+          SUM(CASE WHEN "pendingCnt" > 0 THEN 1 ELSE 0 END) AS "pendingCnt"
         FROM (
           SELECT ${countWindowCols}
           FROM "Order" WHERE 1=1${searchFilter}
@@ -158,8 +158,8 @@ export async function GET(req: NextRequest) {
     }
 
     const [totals, repeat] = await Promise.all([
-      prisma.$queryRaw<{ totalCustomers: unknown; totalOrders: unknown; totalRevenue: unknown }[]>`SELECT COUNT(DISTINCT customerPhone) AS totalCustomers, COUNT(*) AS totalOrders, SUM(total) AS totalRevenue FROM "Order"`,
-      prisma.$queryRaw<{ cnt: unknown }[]>`SELECT COUNT(*) AS cnt FROM (SELECT customerPhone FROM "Order" GROUP BY customerPhone HAVING COUNT(*) > 1)`,
+      prisma.$queryRaw<{ totalCustomers: unknown; totalOrders: unknown; totalRevenue: unknown }[]>`SELECT COUNT(DISTINCT "customerPhone") AS totalCustomers, COUNT(*) AS totalOrders, SUM(total) AS totalRevenue FROM "Order"`,
+      prisma.$queryRaw<{ cnt: unknown }[]>`SELECT COUNT(*) AS cnt FROM (SELECT "customerPhone" FROM "Order" GROUP BY "customerPhone" HAVING COUNT(*) > 1)`,
     ])
 
     return NextResponse.json({

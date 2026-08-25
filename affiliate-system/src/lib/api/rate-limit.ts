@@ -65,9 +65,21 @@ export function enforceRateLimit(key: string, limit: number, windowMs: number): 
 }
 
 /** Best-effort client IP extraction behind proxies/tunnels. */
+/**
+ * Extracts the caller IP from fetch-style Requests AND from NextAuth v4's
+ * authorize() context, whose second argument is a plain options object with
+ * a record-style `headers` (no .get()). Defensive accessor handles both.
+ */
 export function clientIp(req: Request): string {
-  const h = req.headers
-  const forwarded = h.get("x-forwarded-for")
+  type HeaderBag = { get(k: string): string | null } | Record<string, string | undefined>
+  const h: HeaderBag | undefined = (req as unknown as { headers?: HeaderBag }).headers
+  const get = (k: string): string | null | undefined => {
+    if (!h) return null
+    if ("get" in h && typeof h.get === "function") return h.get(k)
+    const rec = h as Record<string, string | undefined>
+    return rec[k] ?? rec[k.toLowerCase()]
+  }
+  const forwarded = get("x-forwarded-for")
   if (forwarded) return forwarded.split(",")[0].trim()
-  return h.get("x-real-ip") || "unknown"
+  return get("x-real-ip") || "unknown"
 }

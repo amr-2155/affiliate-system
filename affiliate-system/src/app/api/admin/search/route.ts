@@ -75,18 +75,18 @@ export async function GET(req: NextRequest) {
         : Promise.resolve([]),
       canCustomers
         ? prisma.$queryRaw<{ phone: string; name: string; orderCount: unknown; totalValue: unknown; lastOrderAt: unknown }[]>`
-            SELECT phone, name, orderCount, totalValue, lastOrderAt FROM (
+            SELECT phone, name, "orderCount", "totalValue", "lastOrderAt" FROM (
               SELECT
-                customerPhone AS phone,
-                customerName AS name,
-                COUNT(*) OVER (PARTITION BY customerPhone) AS orderCount,
-                SUM(total) OVER (PARTITION BY customerPhone) AS totalValue,
-                MAX(createdAt) OVER (PARTITION BY customerPhone) AS lastOrderAt,
-                ROW_NUMBER() OVER (PARTITION BY customerPhone ORDER BY createdAt DESC) AS rn
+                "customerPhone" AS phone,
+                "customerName" AS name,
+                COUNT(*) OVER (PARTITION BY "customerPhone") AS "orderCount",
+                SUM(total) OVER (PARTITION BY "customerPhone") AS "totalValue",
+                MAX("createdAt") OVER (PARTITION BY "customerPhone") AS "lastOrderAt",
+                ROW_NUMBER() OVER (PARTITION BY "customerPhone" ORDER BY "createdAt" DESC) AS rn
               FROM "Order"
-              WHERE LOWER(customerPhone) LIKE LOWER(${like}) OR LOWER(customerName) LIKE LOWER(${like})
+              WHERE LOWER("customerPhone") LIKE LOWER(${like}) OR LOWER("customerName") LIKE LOWER(${like})
             ) WHERE rn = 1
-            ORDER BY lastOrderAt DESC
+            ORDER BY "lastOrderAt" DESC
             LIMIT 5
           `
         : Promise.resolve([]),

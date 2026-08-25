@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { execSync } from "child_process"
 import { join } from "path"
 import { PrismaClient } from "../src/generated/prisma/client"
+import { setupTestDatabase } from "./setup-db"
 
 const DB_PATH = join(__dirname, "test-withdrawal.db")
 function createPrisma() { return new PrismaClient({ datasources: { db: { url: "file:" + DB_PATH } } }) }
@@ -13,11 +14,9 @@ async function mkAff(p: PrismaClient, o: Record<string, any> = {}) {
 }
 
 describe("Withdrawal Security", () => {
-  before(() => {
-    execSync("npx prisma db push --schema=prisma/schema.prisma --skip-generate", {
-      cwd: join(__dirname, ".."), env: { ...process.env, DATABASE_URL: "file:" + DB_PATH }, stdio: "pipe",
-    })
-    prisma = createPrisma()
+  before(async () => {
+    process.env.DATABASE_URL = await setupTestDatabase("test-withdrawal.db")
+    prisma = new PrismaClient()
   })
   after(async () => { await prisma?.$disconnect() })
 

@@ -14,6 +14,7 @@
  *   the confirmed disposable staging DB (host must be localhost:5433)
  */
 import "dotenv/config"
+import { Prisma } from "../src/generated/prisma/client"
 import { DatabaseSync } from "node:sqlite"
 import path from "path"
 
@@ -44,8 +45,8 @@ interface ModelSpec {
 const MODELS: ModelSpec[] = [
   { table: "SystemSetting", order: "key", dates: ["updatedAt"] },
   { table: "OrderCounter", order: "id" },
-  { table: "ShippingRate", order: "id", dates: ["createdAt"] },
-  { table: "SupplierCampaignSettings", order: "id", dates: ["updatedAt"] },
+  { table: "ShippingRate", order: "id", dates: ["createdAt"], bools: ["isActive"] },
+  { table: "SupplierCampaignSettings", order: "id", dates: ["updatedAt"], bools: ["enabled", "includeCollected", "durationStartFromActivation"] },
   { table: "Category", order: "id", dates: ["createdAt"] },
   { table: "ApiKey", order: "id", dates: ["lastUsedAt", "createdAt", "revokedAt"], bools: ["enabled"] },
   { table: "Webhook", order: "id", dates: ["lastDeliveryAt", "createdAt", "updatedAt"], bools: ["enabled"] },
@@ -78,13 +79,33 @@ const MODELS: ModelSpec[] = [
   { table: "BonusLedger", order: "id", dates: ["paidAt", "createdAt"] },
 ]
 
+/**
+ * DateTime coercion for the three shapes found in dev.db:
+ * 1. INTEGER epoch-ms   (Prisma default)            → new Date(n)
+ * 2. TEXT numeric       (rare legacy writes)        → new Date(Number)
+ * 3. TEXT "YYYY-MM-DD HH:MM:SS" (non-Prisma seeds)  → parsed as UTC (documented:
+ *    affects only 3 SystemSetting.updatedAt metadata fields; setting VALUES
+ *    untouched). Throws on anything unparseable so failures are loud.
+ */
+function toDateValue(v: unknown): Date {
+  if (typeof v === "number") return new Date(v)
+  if (typeof v === "bigint") return new Date(Number(v))
+  const s = String(v).trim()
+  const n = Number(s)
+  if (s !== "" && Number.isFinite(n)) return new Date(n)
+  const normalized = s.includes("T") ? s : s.replace(" ", "T")
+  const d = new Date(normalized.endsWith("Z") ? normalized : normalized + "Z")
+  if (isNaN(d.getTime())) throw new Error(`Unparseable datetime value: ${JSON.stringify(String(v))}`)
+  return d
+}
+
 function coerce(row: Record<string, unknown>, spec: ModelSpec): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(row)) {
     if (spec.bools?.includes(k)) {
       out[k] = v === null || v === undefined ? null : Number(v) !== 0
     } else if (spec.dates?.includes(k)) {
-      out[k] = v === null || v === undefined ? null : new Date(Number(v))
+      out[k] = v === null || v === undefined ? null : toDateValue(v)
     } else {
       out[k] = v
     }
@@ -95,6 +116,155 @@ function coerce(row: Record<string, unknown>, spec: ModelSpec): Record<string, u
 async function rowCount(table: string): Promise<number> {
   const res = await pg.$queryRawUnsafe<{ n: bigint }[]>(`SELECT COUNT(*)::bigint AS n FROM "${table}"`)
   return Number(res[0]?.n ?? 0)
+}
+
+/** Fully-typed per-model insert dispatch (explicit allowlist, no dynamic any). */
+async function insertBatch(table: string, rows: Record<string, unknown>[]): Promise<void> {
+  if (table === "SystemSetting") {
+    await pg.systemSetting.createMany({ data: rows as never as Prisma.SystemSettingCreateManyInput[] })
+  } else if (table === "OrderCounter") {
+    await pg.orderCounter.createMany({ data: rows as never as Prisma.OrderCounterCreateManyInput[] })
+  } else if (table === "ShippingRate") {
+    await pg.shippingRate.createMany({ data: rows as never as Prisma.ShippingRateCreateManyInput[] })
+  } else if (table === "SupplierCampaignSettings") {
+    await pg.supplierCampaignSettings.createMany({ data: rows as never as Prisma.SupplierCampaignSettingsCreateManyInput[] })
+  } else if (table === "Category") {
+    await pg.category.createMany({ data: rows as never as Prisma.CategoryCreateManyInput[] })
+  } else if (table === "ApiKey") {
+    await pg.apiKey.createMany({ data: rows as never as Prisma.ApiKeyCreateManyInput[] })
+  } else if (table === "Webhook") {
+    await pg.webhook.createMany({ data: rows as never as Prisma.WebhookCreateManyInput[] })
+  } else if (table === "WebhookDelivery") {
+    await pg.webhookDelivery.createMany({ data: rows as never as Prisma.WebhookDeliveryCreateManyInput[] })
+  } else if (table === "ShippingProvider") {
+    await pg.shippingProvider.createMany({ data: rows as never as Prisma.ShippingProviderCreateManyInput[] })
+  } else if (table === "User") {
+    await pg.user.createMany({ data: rows as never as Prisma.UserCreateManyInput[] })
+  } else if (table === "SupplierReferral") {
+    await pg.supplierReferral.createMany({ data: rows as never as Prisma.SupplierReferralCreateManyInput[] })
+  } else if (table === "SupplierReferralEvent") {
+    await pg.supplierReferralEvent.createMany({ data: rows as never as Prisma.SupplierReferralEventCreateManyInput[] })
+  } else if (table === "Product") {
+    await pg.product.createMany({ data: rows as never as Prisma.ProductCreateManyInput[] })
+  } else if (table === "ProductVariant") {
+    await pg.productVariant.createMany({ data: rows as never as Prisma.ProductVariantCreateManyInput[] })
+  } else if (table === "ProductGalleryImage") {
+    await pg.productGalleryImage.createMany({ data: rows as never as Prisma.ProductGalleryImageCreateManyInput[] })
+  } else if (table === "IncentiveCampaign") {
+    await pg.incentiveCampaign.createMany({ data: rows as never as Prisma.IncentiveCampaignCreateManyInput[] })
+  } else if (table === "Order") {
+    await pg.order.createMany({ data: rows as never as Prisma.OrderCreateManyInput[] })
+  } else if (table === "OrderItem") {
+    await pg.orderItem.createMany({ data: rows as never as Prisma.OrderItemCreateManyInput[] })
+  } else if (table === "OrderComment") {
+    await pg.orderComment.createMany({ data: rows as never as Prisma.OrderCommentCreateManyInput[] })
+  } else if (table === "OrderImage") {
+    await pg.orderImage.createMany({ data: rows as never as Prisma.OrderImageCreateManyInput[] })
+  } else if (table === "ConfirmationAttempt") {
+    await pg.confirmationAttempt.createMany({ data: rows as never as Prisma.ConfirmationAttemptCreateManyInput[] })
+  } else if (table === "Shipment") {
+    await pg.shipment.createMany({ data: rows as never as Prisma.ShipmentCreateManyInput[] })
+  } else if (table === "CommissionLog") {
+    await pg.commissionLog.createMany({ data: rows as never as Prisma.CommissionLogCreateManyInput[] })
+  } else if (table === "Withdrawal") {
+    await pg.withdrawal.createMany({ data: rows as never as Prisma.WithdrawalCreateManyInput[] })
+  } else if (table === "Notification") {
+    await pg.notification.createMany({ data: rows as never as Prisma.NotificationCreateManyInput[] })
+  } else if (table === "Favorite") {
+    await pg.favorite.createMany({ data: rows as never as Prisma.FavoriteCreateManyInput[] })
+  } else if (table === "ProductSuggestion") {
+    await pg.productSuggestion.createMany({ data: rows as never as Prisma.ProductSuggestionCreateManyInput[] })
+  } else if (table === "MarketingStrategy") {
+    await pg.marketingStrategy.createMany({ data: rows as never as Prisma.MarketingStrategyCreateManyInput[] })
+  } else if (table === "StockRefillRequest") {
+    await pg.stockRefillRequest.createMany({ data: rows as never as Prisma.StockRefillRequestCreateManyInput[] })
+  } else if (table === "StockLog") {
+    await pg.stockLog.createMany({ data: rows as never as Prisma.StockLogCreateManyInput[] })
+  } else if (table === "IncentiveTarget") {
+    await pg.incentiveTarget.createMany({ data: rows as never as Prisma.IncentiveTargetCreateManyInput[] })
+  } else if (table === "IncentiveReward") {
+    await pg.incentiveReward.createMany({ data: rows as never as Prisma.IncentiveRewardCreateManyInput[] })
+  } else if (table === "AdminActivity") {
+    await pg.adminActivity.createMany({ data: rows as never as Prisma.AdminActivityCreateManyInput[] })
+  } else if (table === "BonusLedger") {
+    await pg.bonusLedger.createMany({ data: rows as never as Prisma.BonusLedgerCreateManyInput[] })
+  } else {
+    throw new Error(`No delegate allowlisted for table ${table}`)
+  }
+}
+
+async function insertOne(table: string, row: Record<string, unknown>): Promise<void> {
+  if (table === "SystemSetting") {
+    await pg.systemSetting.create({ data: row as never as Prisma.SystemSettingCreateInput })
+  } else if (table === "OrderCounter") {
+    await pg.orderCounter.create({ data: row as never as Prisma.OrderCounterCreateInput })
+  } else if (table === "ShippingRate") {
+    await pg.shippingRate.create({ data: row as never as Prisma.ShippingRateCreateInput })
+  } else if (table === "SupplierCampaignSettings") {
+    await pg.supplierCampaignSettings.create({ data: row as never as Prisma.SupplierCampaignSettingsCreateInput })
+  } else if (table === "Category") {
+    await pg.category.create({ data: row as never as Prisma.CategoryCreateInput })
+  } else if (table === "ApiKey") {
+    await pg.apiKey.create({ data: row as never as Prisma.ApiKeyCreateInput })
+  } else if (table === "Webhook") {
+    await pg.webhook.create({ data: row as never as Prisma.WebhookCreateInput })
+  } else if (table === "WebhookDelivery") {
+    await pg.webhookDelivery.create({ data: row as never as Prisma.WebhookDeliveryCreateInput })
+  } else if (table === "ShippingProvider") {
+    await pg.shippingProvider.create({ data: row as never as Prisma.ShippingProviderCreateInput })
+  } else if (table === "User") {
+    await pg.user.create({ data: row as never as Prisma.UserCreateInput })
+  } else if (table === "SupplierReferral") {
+    await pg.supplierReferral.create({ data: row as never as Prisma.SupplierReferralCreateInput })
+  } else if (table === "SupplierReferralEvent") {
+    await pg.supplierReferralEvent.create({ data: row as never as Prisma.SupplierReferralEventCreateInput })
+  } else if (table === "Product") {
+    await pg.product.create({ data: row as never as Prisma.ProductCreateInput })
+  } else if (table === "ProductVariant") {
+    await pg.productVariant.create({ data: row as never as Prisma.ProductVariantCreateInput })
+  } else if (table === "ProductGalleryImage") {
+    await pg.productGalleryImage.create({ data: row as never as Prisma.ProductGalleryImageCreateInput })
+  } else if (table === "IncentiveCampaign") {
+    await pg.incentiveCampaign.create({ data: row as never as Prisma.IncentiveCampaignCreateInput })
+  } else if (table === "Order") {
+    await pg.order.create({ data: row as never as Prisma.OrderCreateInput })
+  } else if (table === "OrderItem") {
+    await pg.orderItem.create({ data: row as never as Prisma.OrderItemCreateInput })
+  } else if (table === "OrderComment") {
+    await pg.orderComment.create({ data: row as never as Prisma.OrderCommentCreateInput })
+  } else if (table === "OrderImage") {
+    await pg.orderImage.create({ data: row as never as Prisma.OrderImageCreateInput })
+  } else if (table === "ConfirmationAttempt") {
+    await pg.confirmationAttempt.create({ data: row as never as Prisma.ConfirmationAttemptCreateInput })
+  } else if (table === "Shipment") {
+    await pg.shipment.create({ data: row as never as Prisma.ShipmentCreateInput })
+  } else if (table === "CommissionLog") {
+    await pg.commissionLog.create({ data: row as never as Prisma.CommissionLogCreateInput })
+  } else if (table === "Withdrawal") {
+    await pg.withdrawal.create({ data: row as never as Prisma.WithdrawalCreateInput })
+  } else if (table === "Notification") {
+    await pg.notification.create({ data: row as never as Prisma.NotificationCreateInput })
+  } else if (table === "Favorite") {
+    await pg.favorite.create({ data: row as never as Prisma.FavoriteCreateInput })
+  } else if (table === "ProductSuggestion") {
+    await pg.productSuggestion.create({ data: row as never as Prisma.ProductSuggestionCreateInput })
+  } else if (table === "MarketingStrategy") {
+    await pg.marketingStrategy.create({ data: row as never as Prisma.MarketingStrategyCreateInput })
+  } else if (table === "StockRefillRequest") {
+    await pg.stockRefillRequest.create({ data: row as never as Prisma.StockRefillRequestCreateInput })
+  } else if (table === "StockLog") {
+    await pg.stockLog.create({ data: row as never as Prisma.StockLogCreateInput })
+  } else if (table === "IncentiveTarget") {
+    await pg.incentiveTarget.create({ data: row as never as Prisma.IncentiveTargetCreateInput })
+  } else if (table === "IncentiveReward") {
+    await pg.incentiveReward.create({ data: row as never as Prisma.IncentiveRewardCreateInput })
+  } else if (table === "AdminActivity") {
+    await pg.adminActivity.create({ data: row as never as Prisma.AdminActivityCreateInput })
+  } else if (table === "BonusLedger") {
+    await pg.bonusLedger.create({ data: row as never as Prisma.BonusLedgerCreateInput })
+  } else {
+    throw new Error(`No delegate allowlisted for table ${table}`)
+  }
 }
 
 async function main() {
@@ -119,20 +289,22 @@ async function main() {
       const chunk = srcRows.slice(i, i + BATCH).map((r) => coerce(r, spec))
       if (chunk.length === 0) continue
       try {
-        await (pg as any)[spec.table].createMany({ data: chunk })
+        await insertBatch(spec.table, chunk)
         inserted += chunk.length
       } catch (e) {
         // Fall back to row-by-row so we can attribute the failing ID precisely,
         // then STOP — partial model loads risk referential inconsistency downstream.
         for (const row of chunk) {
           try {
-            await (pg as any)[spec.table].create({ data: row })
+            await insertOne(spec.table, row)
             inserted++
           } catch (rowErr) {
+            const rowId = typeof row.id === "string" || typeof row.id === "number" ? String(row.id) : null
+            const rowKey = typeof row.key === "string" ? row.key : null
             failures.push({
               model: spec.table,
-              id: String((row as any).id ?? "(composite)"),
-              error: rowErr instanceof Error ? rowErr.message.slice(0, 300) : String(rowErr),
+              id: rowId ?? rowKey ?? JSON.stringify(row).slice(0, 120),
+              error: rowErr instanceof Error ? rowErr.message : String(rowErr),
             })
           }
         }

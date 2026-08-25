@@ -49,3 +49,18 @@ prisma/*.db-wal
 prisma/*.db-shm
 backups/
 *.db.bak
+
+# --- Phase 17A checkpoint hygiene ---
+# runtime logs
+*.log
+# backup / temp copies
+*.bak
+# local test databases
+__tests__/test-*.db
+# one-off debug scripts
+scripts/*-debug.ps1
+scripts/race-mini.ps1
+scripts/sess-debug.ps1
+scripts/cookie-debug.ps1
+# accidental nested repository (investigated Phase 17A)
+affiliate-system/

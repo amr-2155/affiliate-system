@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert/strict"
-import { execSync } from "child_process"
 import { join } from "path"
+import { setupTestDatabase } from "./setup-db"
 import type { PrismaClient, IncentiveReward } from "../src/generated/prisma/client"
 import type * as OrderService from "../src/lib/order-service"
 
@@ -92,14 +92,9 @@ async function withdrawGate(userId: string, amount: number): Promise<"OK" | "INS
 
 describe("Financial Concurrency (Phase 14 fixes)", () => {
   before(async () => {
-    execSync("npx prisma db push --schema=prisma/schema.prisma --skip-generate", {
-      cwd: join(__dirname, ".."),
-      env: { ...process.env, DATABASE_URL: "file:" + DB_PATH },
-      stdio: "pipe",
-    })
-    process.env.DATABASE_URL = "file:" + DB_PATH
+    process.env.DATABASE_URL = await setupTestDatabase("test-concurrency.db")
     const p = await import("../src/generated/prisma/client")
-    prisma = new p.PrismaClient({ datasources: { db: { url: "file:" + DB_PATH } } })
+    prisma = new p.PrismaClient()
     // Real production primitive used by the fixed batch route
     const svc = await import("../src/lib/order-service")
     runTransition = svc.applyOrderTransition

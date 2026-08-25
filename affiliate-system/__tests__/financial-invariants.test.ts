@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { execSync } from "child_process"
 import { join } from "path"
 import { PrismaClient } from "../src/generated/prisma/client"
+import { setupTestDatabase } from "./setup-db"
 import { computeItemCommission } from "../src/lib/commission"
 
 const DB_PATH = join(__dirname, "test-financial.db")
@@ -27,11 +28,9 @@ async function mkProd(p: PrismaClient, o: Record<string, any> = {}) {
 }
 
 describe("Financial Invariants", () => {
-  before(() => {
-    execSync("npx prisma db push --schema=prisma/schema.prisma --skip-generate", {
-      cwd: join(__dirname, ".."), env: { ...process.env, DATABASE_URL: "file:" + DB_PATH }, stdio: "pipe",
-    })
-    prisma = createPrisma()
+  before(async () => {
+    process.env.DATABASE_URL = await setupTestDatabase("test-financial.db")
+    prisma = new PrismaClient()
   })
   after(async () => { await prisma?.$disconnect() })
 
